@@ -1,0 +1,12 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    direction: rtl;
+    font-family: 'Readex Pro', system-ui, -apple-system, sans-serif;
+    background-color: #FAF7F0;
+    color: #162921;
+  }
+}
