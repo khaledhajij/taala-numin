@@ -152,7 +152,6 @@ function AccountApp({ identity }: { identity: string | null }) {
   // Onboarding / Profile form
   const [adminKnownNameInput, setAdminKnownNameInput] = useState<string>('');
   const [publicDisplayNameInput, setPublicDisplayNameInput] = useState<string>('');
-  const [leaderboardOptInInput, setLeaderboardOptInInput] = useState<boolean>(false);
   const [profileFeedback, setProfileFeedback] = useState<{
     type: 'success' | 'error';
     text: string;
@@ -244,7 +243,6 @@ function AccountApp({ identity }: { identity: string | null }) {
       }
       if (p && !profileDirty.current) {
         setAdminKnownNameInput(p.adminKnownName); setPublicDisplayNameInput(p.publicDisplayName);
-        setLeaderboardOptInInput(p.leaderboardOptIn);
       }
       setMyAchievements((records.data ?? []).map(mapAchievement));
       const lb = leaderboard.data;
@@ -420,7 +418,7 @@ function AccountApp({ identity }: { identity: string | null }) {
             data: {
               admin_known_name: adminKnownNameInput.trim(),
               public_display_name: publicDisplayNameInput.trim(),
-              leaderboard_opt_in: leaderboardOptInInput,
+              leaderboard_opt_in: true,
             },
           },
         });
@@ -458,7 +456,6 @@ function AccountApp({ identity }: { identity: string | null }) {
     setSaveFeedback(null);
     setAdminKnownNameInput('');
     setPublicDisplayNameInput('');
-    setLeaderboardOptInInput(false);
     setProfileFeedback(null);
     setAdminBanner(null);
     setDataError(null);
@@ -485,7 +482,7 @@ function AccountApp({ identity }: { identity: string | null }) {
       if (nameError) throw new Error(nameError);
       const { error } = await supabase!.rpc('upsert_my_profile', {
         p_admin_known_name: adminKnownNameInput.trim(), p_public_display_name: publicDisplayNameInput.trim(),
-        p_leaderboard_opt_in: leaderboardOptInInput,
+        p_leaderboard_opt_in: true,
       });
       if (error) throw error;
       if (!alive.current) return;
@@ -862,19 +859,6 @@ function AccountApp({ identity }: { identity: string | null }) {
                         className="w-full min-h-[46px] px-3.5 py-2 rounded-xl border border-[#D5CBB4] text-sm focus:outline-none focus:ring-2 focus:ring-[#144734]"
                       />
                     </div>
-
-                    <label className="flex items-start gap-2.5 p-3.5 rounded-2xl bg-[#FAF7F0] border border-[#E6DEC8] text-xs cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={leaderboardOptInInput}
-                        onChange={(e) => { profileDirty.current = true; setLeaderboardOptInInput(e.target.checked); }}
-                        className="mt-0.5 w-4 h-4 accent-[#144734]"
-                      />
-                      <span>
-                        المشاركة الاختيارية في لوحة الصدارة العامة باسمي المستعار (الوضع الافتراضي:
-                        غير مفعّل)
-                      </span>
-                    </label>
                   </div>
                 )}
 
@@ -943,14 +927,6 @@ function AccountApp({ identity }: { identity: string | null }) {
                   className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm focus:outline-none focus:ring-2 focus:ring-[#144734]"
                 />
               </div>
-              <label className="flex items-center gap-2 text-xs cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={leaderboardOptInInput}
-                  onChange={(e) => { profileDirty.current = true; setLeaderboardOptInInput(e.target.checked); }}
-                />
-                <span>الظهور الاختياري في لوحة الصدارة العامة</span>
-              </label>
               <button
                 type="submit"
                 className="w-full min-h-[48px] rounded-xl bg-[#144734] hover:bg-[#0D3123] text-white font-bold text-sm transition"
@@ -1014,14 +990,6 @@ function AccountApp({ identity }: { identity: string | null }) {
                   className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm focus:outline-none focus:ring-2 focus:ring-[#144734]"
                 />
               </div>
-              <label className="flex items-center gap-2 text-xs cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={leaderboardOptInInput}
-                  onChange={(e) => { profileDirty.current = true; setLeaderboardOptInInput(e.target.checked); }}
-                />
-                <span>الظهور في لوحة الصدارة بعد التفعيل</span>
-              </label>
               <button
                 type="submit"
                 className="w-full min-h-[44px] rounded-xl bg-[#144734] hover:bg-[#0D3123] text-white font-bold text-xs transition"
@@ -1273,7 +1241,7 @@ function AccountApp({ identity }: { identity: string | null }) {
                 <section className="bg-white rounded-3xl p-6 border border-[#E6DEC8] space-y-3">
                   <div className="flex items-center justify-between">
                     <h2 className="text-lg font-bold text-[#144734]">
-                      الهدف الجماعي للحلقة (80%)
+                      الهدف الجماعي للحلقة (المستهدف: {serverLeaderboard?.collectiveGoalPct ?? challenge.collectiveGoalPct}%)
                     </h2>
                     <span className="text-xl font-bold text-[#144734]">
                       {serverLeaderboard?.groupCompletionPct ?? 0}%
@@ -1304,12 +1272,6 @@ function AccountApp({ identity }: { identity: string | null }) {
                           : serverLeaderboard.mySummary.week_points}{' '}
                         نقطة)
                       </span>
-                      {!serverLeaderboard.mySummary.leaderboard_opt_in && (
-                        <p className="text-[#5B6E65] text-[11px] mt-0.5">
-                          اسمك غير ظاهر للآخرين في لوحة الصدارة العامة (يمكنك تفعيل الظهور من تبويب
-                          الملف الشخصي).
-                        </p>
-                      )}
                     </div>
                     <span className="px-2.5 py-1 rounded-full bg-white text-[#144734] font-bold border border-[#144734]/20">
                       {serverLeaderboard.mySummary.display_name}
@@ -1442,14 +1404,6 @@ function AccountApp({ identity }: { identity: string | null }) {
                       className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm focus:outline-none focus:ring-2 focus:ring-[#144734]"
                     />
                   </div>
-                  <label className="flex items-center gap-2 text-xs cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={leaderboardOptInInput}
-                      onChange={(e) => { profileDirty.current = true; setLeaderboardOptInInput(e.target.checked); }}
-                    />
-                    <span>الظهور الاختياري في لوحة الصدارة العامة</span>
-                  </label>
                   <button
                     type="submit"
                     className="w-full min-h-[46px] rounded-xl bg-[#144734] hover:bg-[#0D3123] text-white font-bold text-xs transition"

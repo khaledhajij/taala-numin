@@ -328,7 +328,7 @@ export function calculatePersonalDashboard(
  * Computes leaderboard and group statistics:
  * - Excludes administrator accounts from rankings and group scoring
  * - Assigns equal competition ranks for equal scores (1, 1, 3)
- * - Respects leaderboardOptIn (only opted-in students appear in public rankings)
+ * - Includes all approved students in public rankings
  * - Never exposes student emails, adminKnownName, or individual activity breakdowns
  */
 export function computeLeaderboardAndGroupStats(
@@ -427,24 +427,20 @@ export function computeLeaderboardAndGroupStats(
     }
   });
 
-  const overallRankings: PublicLeaderboardRow[] = sortedOverall
-    .filter((s) => s.leaderboardOptIn)
-    .map((s) => ({
-      rank: overallRankById.get(s.studentId)!,
-      displayName: s.displayName,
-      points: s.totalPoints,
-      fullDaysCount: s.fullDaysCount,
-      isCurrentUser: s.studentId === callerStudentId,
-    }));
+  const overallRankings: PublicLeaderboardRow[] = sortedOverall.map((s) => ({
+    rank: overallRankById.get(s.studentId)!,
+    displayName: s.displayName,
+    points: s.totalPoints,
+    fullDaysCount: s.fullDaysCount,
+    isCurrentUser: s.studentId === callerStudentId,
+  }));
 
-  const weeklyRankings: PublicLeaderboardRow[] = sortedWeekly
-    .filter((s) => s.leaderboardOptIn)
-    .map((s) => ({
-      rank: weekRankById.get(s.studentId)!,
-      displayName: s.displayName,
-      points: s.weekPoints,
-      isCurrentUser: s.studentId === callerStudentId,
-    }));
+  const weeklyRankings: PublicLeaderboardRow[] = sortedWeekly.map((s) => ({
+    rank: weekRankById.get(s.studentId)!,
+    displayName: s.displayName,
+    points: s.weekPoints,
+    isCurrentUser: s.studentId === callerStudentId,
+  }));
 
   const callerRecord = callerStudentId
     ? studentAggregates.find((s) => s.studentId === callerStudentId) ?? null

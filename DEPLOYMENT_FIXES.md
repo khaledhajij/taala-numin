@@ -6,10 +6,11 @@ These changes are local until you apply the SQL migration and redeploy. No live 
 
 1. Apply `supabase/migrations/20261015000005_signup_requests.sql` if it has not already been applied.
 2. Apply `supabase/migrations/20261015000006_logic_and_security.sql` in Supabase SQL Editor as the database administrator.
-3. Explicitly attest each real admin account using the steps below. **Existing email-linked admins lose admin privileges until this step is completed.** Student profiles, approval statuses and achievements are preserved. Admin identities are not automatically trusted because an old email match does not prove account ownership.
-4. Redeploy the frontend with the existing Supabase public URL/key environment variables.
+3. Apply `supabase/migrations/20261015000007_all_users_in_leaderboard.sql` in Supabase SQL Editor to include all approved students on the leaderboard and remove optional choosing.
+4. Explicitly attest each real admin account using the steps below. **Existing email-linked admins lose admin privileges until this step is completed.** Student profiles, approval statuses and achievements are preserved. Admin identities are not automatically trusted because an old email match does not prove account ownership.
+5. Redeploy the frontend with the existing Supabase public URL/key environment variables.
 
-For a new project, apply all six migrations in filename order before exposing the application, then create and attest the admin account.
+For a new project, apply all seven migrations in filename order before exposing the application, then create and attest the admin account.
 
 ## Attest your admin identity
 
@@ -41,6 +42,7 @@ Refresh the application; the admin panel should appear. Keep email confirmation 
 - A stale-save error keeps the local draft. Use “تحميل أحدث سجل واستبدال التعديلات المحلية” to explicitly load the latest version before editing again.
 - Reports are read from a guarded JSON RPC in one database statement, avoiding the API row cap. Export fetches a fresh report before generating the CSV.
 - If there is no current challenge, global approvals still work; use the new-cycle action to create one. Current-challenge configuration is disabled until a challenge exists.
+- All approved students appear on the public leaderboard. The optional opt-in choice and checkboxes have been completely removed.
 
 ## Validation
 

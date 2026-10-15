@@ -20,6 +20,16 @@ test('production domain: standings require challenge membership and exclude ever
   assert.equal(result.approvedStudentCount,1);
   assert.equal(result.overallRankings.length,1);
 });
+test('production domain: all approved students are included in leaderboard unconditionally',()=> {
+  const students=[
+    {id:'s1',email:'s1@example.com',publicDisplayName:'Student 1',membershipStatus:'approved',challengeMembershipStatus:'approved',leaderboardOptIn:false},
+    {id:'s2',email:'s2@example.com',publicDisplayName:'Student 2',membershipStatus:'approved',challengeMembershipStatus:'approved',leaderboardOptIn:true},
+  ];
+  const result=domain.computeLeaderboardAndGroupStats(ch,students,[],[],null,'2026-10-15');
+  assert.equal(result.approvedStudentCount,2);
+  assert.equal(result.overallRankings.length,2);
+  assert.equal(result.weeklyRankings.length,2);
+});
 test('production domain: archived membership survives later global suspension',()=> {
   const students=[{id:'s',email:'s@example.com',publicDisplayName:'Student',membershipStatus:'suspended',challengeMembershipStatus:'approved',leaderboardOptIn:true}];
   assert.equal(domain.computeLeaderboardAndGroupStats({...ch,isArchived:true},students,[],[],null,'2026-11-01').approvedStudentCount,1);

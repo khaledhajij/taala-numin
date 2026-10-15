@@ -114,7 +114,7 @@ class SecureDatabaseSimulator {
     return this.appAdmins.has(session.email.trim().toLowerCase());
   }
 
-  createOrUpdateOwnProfile(session, { adminKnownName, publicDisplayName, leaderboardOptIn = false, attemptedRole }) {
+  createOrUpdateOwnProfile(session, { adminKnownName, publicDisplayName, leaderboardOptIn = true, attemptedRole }) {
     if (!session || !session.userId) {
       throw new Error('UNAUTHENTICATED');
     }
@@ -136,7 +136,7 @@ class SecureDatabaseSimulator {
       email: session.email.trim().toLowerCase(),
       adminKnownName: adminKnownName.trim(),
       publicDisplayName: publicDisplayName.trim(),
-      leaderboardOptIn: Boolean(leaderboardOptIn),
+      leaderboardOptIn: true,
       membershipStatus: status,
     };
     this.profiles.set(session.userId, profile);
@@ -286,7 +286,7 @@ class SecureDatabaseSimulator {
     });
 
     return scored
-      .filter((s) => s.leaderboardOptIn)
+      .filter(() => true)
       .map((s) => ({
         rank: ranks.get(s.studentId),
         displayName: s.displayName,
@@ -337,7 +337,7 @@ test('1. Authentication & membership restrictions (unauthenticated, pending, app
     publicDisplayName: 'أبو حفص',
   });
   assert.equal(profile.membershipStatus, 'pending');
-  assert.equal(profile.leaderboardOptIn, false);
+  assert.equal(profile.leaderboardOptIn, true);
 
   const updatedPending = db.createOrUpdateOwnProfile(studentSession, {
     adminKnownName: 'عمر الفاروق',
@@ -668,7 +668,7 @@ test('9. Leaderboard ties, administrator exclusion, and privacy opt-out', () => 
     [s1, 'أنس', true, { quranTwoPages: true, ishaCongregation: true, morningAdhkar: true }],
     [s2, 'بشير', true, { quranTwoPages: true, ishaCongregation: true, morningAdhkar: true }],
     [s3, 'حذيفة', true, { quranTwoPages: true, ishaCongregation: false, morningAdhkar: false }],
-    [s4Hidden, 'سلمان (مخفي)', false, { quranTwoPages: true, ishaCongregation: true, morningAdhkar: true }],
+    [s4Hidden, 'سلمان', true, { quranTwoPages: true, ishaCongregation: true, morningAdhkar: true }],
   ]) {
     db.createOrUpdateOwnProfile(sess, {
       adminKnownName: `الاسم الكامل - ${name}`,
@@ -685,13 +685,15 @@ test('9. Leaderboard ties, administrator exclusion, and privacy opt-out', () => 
   }
 
   const board = db.getLeaderboard(s1, 'ch-1');
-  assert.equal(board.length, 3);
+  assert.equal(board.length, 4);
   assert.equal(board[0].displayName, 'أنس');
   assert.equal(board[0].rank, 1);
   assert.equal(board[1].displayName, 'بشير');
   assert.equal(board[1].rank, 1, 'Tied students must receive equal rank 1');
-  assert.equal(board[2].displayName, 'حذيفة');
-  assert.equal(board[2].rank, 4);
+  assert.equal(board[2].displayName, 'سلمان');
+  assert.equal(board[2].rank, 1);
+  assert.equal(board[3].displayName, 'حذيفة');
+  assert.equal(board[3].rank, 4);
   for (const row of board) {
     assert.equal('email' in row, false);
     assert.equal('adminKnownName' in row, false);
@@ -813,6 +815,9 @@ test('13. SQL Migrations static verification (RLS, Force RLS, SECURITY DEFINER s
   const m6 = fs.readFileSync(path.join(migrationsDir, '20261015000006_logic_and_security.sql'), 'utf8');
   assert.match(m6, /set search_path = public, pg_temp/i);
   assert.match(m6, /revoke all on function public\.register_admin_user/i);
+  const m7 = fs.readFileSync(path.join(migrationsDir, '20261015000007_all_users_in_leaderboard.sql'), 'utf8');
+  assert.match(m7, /set search_path = public, pg_temp/i);
+  assert.match(m7, /revoke all on function public\.get_leaderboard_and_group_stats/i);
 });
 
 test('14. Production domain logic & utility validation (UUID, null-safety, dashboard metrics)', () => {
