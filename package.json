@@ -8,7 +8,11 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "node --test tests/domain_and_security.test.mjs"
+    "test": "node --test tests/domain_and_security.test.mjs tests/app.integration.test.mjs tests/production-domain.test.mjs",
+    "test:unit": "node --test tests/domain_and_security.test.mjs tests/production-domain.test.mjs",
+    "test:app": "node --test tests/app.integration.test.mjs",
+    "test:db": "node --liftoff-only --no-wasm-tier-up --max-old-space-size=4096 --test tests/database.integration.test.mjs",
+    "test:all": "npm test && npm run test:db"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.48.1",
@@ -17,11 +21,13 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.10",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.5.1",
+    "react-test-renderer": "^18.3.1",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.3",
     "vite": "^6.0.11"

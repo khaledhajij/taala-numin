@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   AlertCircle,
   Calendar,
@@ -8,6 +8,7 @@ import {
   Download,
   Flame,
   LogOut,
+  RefreshCw,
   Settings,
   ShieldAlert,
   Sparkles,
@@ -16,6 +17,7 @@ import {
   UserPlus,
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from './lib/supabase';
+import { EMPTY_CHALLENGE, errorMessage, validateProfileNames, mapProfile, mapAchievement, mapChallenge, mapReport } from './lib/appData';
 import {
   ChallengeConfig,
   DailyAchievementRecord,
@@ -33,6 +35,7 @@ import {
   evaluateChallengeWindow,
   generateSafeAdminCsv,
   getDamascusDateString,
+  isValidUuid,
 } from './lib/domainLogic';
 
 type ActiveTab = 'today' | 'dashboard' | 'leaderboard' | 'profile' | 'admin';
@@ -50,13 +53,36 @@ function translateAuthError(message: string): string {
     return 'يجب ألا تقل كلمة المرور عن 6 أحرف.';
   }
   if (lower.includes('email not confirmed')) {
-    return 'يرجى تفعيل خيار إيقاف تأكيد البريد (Confirm email = OFF) من لوحة تحكم Supabase أو تأكيد الرسالة المرسلة لبريدك.';
+    return 'يرجى تأكيد بريدك الإلكتروني عبر الرسالة المرسلة إليه ثم تسجيل الدخول.';
+  }
+  if (lower.includes('rate limit') || lower.includes('too many requests')) {
+    return 'تم تجاوز الحد المسموح من المحاولات مؤقتاً. يرجى الانتظار دقيقة والمحاولة مجدداً.';
+  }
+  if (lower.includes('failed to fetch') || lower.includes('networkerror')) {
+    return 'تعذّر الاتصال بالخادم. يرجى التحقق من اتصال الإنترنت.';
   }
   return message;
 }
 
 export default function App() {
-  const [loadingSession, setLoadingSession] = useState<boolean>(isSupabaseConfigured);
+  const [identity, setIdentity] = useState<string | null>(null);
+  const [ready, setReady] = useState(!isSupabaseConfigured);
+  useEffect(() => {
+    if (!supabase) return;
+    // INITIAL_SESSION also covers persisted sessions. Same-user auth events do not remount forms.
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      setIdentity(session?.user.id ?? null);
+      setReady(true);
+    });
+    return () => data.subscription.unsubscribe();
+  }, []);
+  if (!ready) return <p dir="rtl" role="status">جاري التحقق من الجلسة...</p>;
+  // Discard every account-scoped state value and request on an identity change.
+  return <AccountApp key={identity ?? 'signed-out'} identity={identity} />;
+}
+
+function AccountApp({ identity }: { identity: string | null }) {
+  const [loadingSession, setLoadingSession] = useState<boolean>(Boolean(identity));
   const [authError, setAuthError] = useState<string | null>(null);
   const [authSuccessMsg, setAuthSuccessMsg] = useState<string | null>(null);
   const [authFormMode, setAuthFormMode] = useState<AuthFormMode>('sign_in');
@@ -65,23 +91,15 @@ export default function App() {
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [authSubmitting, setAuthSubmitting] = useState<boolean>(false);
 
-  const [sessionUserId, setSessionUserId] = useState<string | null>(null);
-  const [sessionEmail, setSessionEmail] = useState<string | null>(null);
+  const [sessionUserId, setSessionUserId] = useState<string | null>(identity);
+  const [, setSessionEmail] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
   const [damascusToday, setDamascusToday] = useState<string>(() =>
     getDamascusDateString(new Date())
   );
 
   const [profile, setProfile] = useState<StudentProfile | null>(null);
-  const [challenge, setChallenge] = useState<ChallengeConfig>({
-    id: 'default-challenge',
-    title: 'تعالَ نؤمن ساعة',
-    communityName: 'حلقة سيدنا أبو بكر الصديق',
-    startDate: null,
-    durationDays: 30,
-    collectiveGoalPct: 80,
-    isArchived: false,
-  });
+  const [challenge, setChallenge] = useState<ChallengeConfig>(EMPTY_CHALLENGE);
 
   const [myAchievements, setMyAchievements] = useState<DailyAchievementRecord[]>([]);
   const [allProfilesForAdmin, setAllProfilesForAdmin] = useState<StudentProfile[]>([]);
@@ -152,183 +170,147 @@ export default function App() {
     type: 'success' | 'error';
     text: string;
   } | null>(null);
-  const [newChallengeTitle, setNewChallengeTitle] = useState<string>(
-    'تعالَ نؤمن ساعة — الدورة التالية'
-  );
-  const [newChallengeStartDate, setNewChallengeStartDate] = useState<string>('');
-  const [showArchiveConfirm, setShowArchiveConfirm] = useState<boolean>(false);
+  const [dataError, setDataError] = useState<string | null>(null);
+  const [newChallengeTitle, setNewChallengeTitle] = useState('تعالَ نؤمن ساعة — الدورة التالية');
+  const [newChallengeStartDate, setNewChallengeStartDate] = useState('');
+  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
+  const [reportGeneratedAt, setReportGeneratedAt] = useState<string | null>(null);
+  const [mutationBusy, setMutationBusy] = useState(false);
+  const mutationLock = useRef(false);
+  const alive = useRef(true);
+  const requestId = useRef(0);
+  const bootstrapFlight = useRef<number | null>(null);
+  const profileDirty = useRef(false);
+  const configDirty = useRef(false);
+  const draftDirty = useRef(false);
+  const draftContext = useRef('');
+  const configContext = useRef('');
+  const [challengeMembership, setChallengeMembership] = useState<MembershipStatus | null>(null);
 
-  const fetchBootstrapData = useCallback(async () => {
-    if (!supabase) return;
-    setLoadingSession(true);
-    try {
-      const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
-      if (sessionErr) throw sessionErr;
-
-      const user = sessionData.session?.user;
-      if (!user) {
-        setSessionUserId(null);
-        setSessionEmail(null);
-        setProfile(null);
-        setIsAdmin(false);
-        return;
-      }
-
-      setSessionUserId(user.id);
-      setSessionEmail(user.email ?? null);
-
-      const { data: boot, error: bootErr } = await supabase.rpc('get_session_bootstrap');
-      if (bootErr) throw bootErr;
-
-      if (boot) {
-        const callerIsAdmin = Boolean(boot.is_admin);
-        setIsAdmin(callerIsAdmin);
-        if (boot.damascus_today) setDamascusToday(boot.damascus_today);
-
-        const activeChallengeId = boot.current_challenge?.id;
-        if (boot.current_challenge) {
-          const ch: ChallengeConfig = {
-            id: boot.current_challenge.id,
-            title: boot.current_challenge.title,
-            communityName: boot.current_challenge.community_name,
-            startDate: boot.current_challenge.start_date,
-            durationDays: boot.current_challenge.duration_days,
-            collectiveGoalPct: boot.current_challenge.collective_goal_pct,
-            isArchived: boot.current_challenge.is_archived,
-          };
-          setChallenge(ch);
-          setCfgTitle(ch.title);
-          setCfgStartDate(ch.startDate ?? '');
-          setCfgDuration(ch.durationDays);
-        }
-
-        if (boot.profile) {
-          const p: StudentProfile = {
-            id: boot.profile.id,
-            email: boot.profile.email,
-            adminKnownName: boot.profile.admin_known_name,
-            publicDisplayName: boot.profile.public_display_name,
-            leaderboardOptIn: boot.profile.leaderboard_opt_in,
-            membershipStatus: boot.profile.membership_status,
-            statusReason: boot.profile.status_reason,
-            statusUpdatedAt: new Date().toISOString(),
-          };
-          setProfile(p);
-          setAdminKnownNameInput(p.adminKnownName);
-          setPublicDisplayNameInput(p.publicDisplayName);
-          setLeaderboardOptInInput(p.leaderboardOptIn);
-
-          if ((p.membershipStatus === 'approved' || callerIsAdmin) && activeChallengeId) {
-            const [{ data: recs }, { data: lbData }] = await Promise.all([
-              supabase
-                .from('daily_achievements')
-                .select('*')
-                .eq('challenge_id', activeChallengeId)
-                .eq('student_id', user.id),
-              supabase.rpc('get_leaderboard_and_group_stats', {
-                p_challenge_id: activeChallengeId,
-              }),
-            ]);
-
-            if (recs) {
-              setMyAchievements(
-                recs.map((r: Record<string, unknown>) => ({
-                  id: String(r.id),
-                  challengeId: String(r.challenge_id),
-                  studentId: String(r.student_id),
-                  achievementDate: String(r.achievement_date),
-                  quranTwoPages: Boolean(r.quran_two_pages),
-                  ishaCongregation: Boolean(r.isha_congregation),
-                  morningAdhkar: Boolean(r.morning_adhkar),
-                  points: Number(r.points ?? 0),
-                  revision: Number(r.revision ?? 1),
-                  updatedAt: String(r.updated_at ?? ''),
-                }))
-              );
-            }
-
-            if (lbData) {
-              setServerLeaderboard({
-                elapsedDays: Number(lbData.elapsed_days ?? 0),
-                currentWeekNum: Number(lbData.current_week_num ?? 1),
-                collectiveGoalPct: Number(lbData.collective_goal_pct ?? 80),
-                approvedStudentCount: Number(lbData.approved_student_count ?? 0),
-                groupTotalPoints: Number(lbData.group_total_points ?? 0),
-                groupAvailablePoints: Number(lbData.group_available_points ?? 0),
-                groupCompletionPct: Number(lbData.group_completion_pct ?? 0),
-                overallRankings: lbData.overall_rankings ?? [],
-                weeklyRankings: lbData.weekly_rankings ?? [],
-                mySummary: lbData.my_summary ?? null,
-              });
-            }
-          }
-        } else {
-          setProfile(null);
-        }
-
-        if (callerIsAdmin && activeChallengeId) {
-          const [{ data: allProfs }, { data: allRecs }] = await Promise.all([
-            supabase.from('profiles').select('*').order('created_at', { ascending: true }),
-            supabase
-              .from('daily_achievements')
-              .select('*')
-              .eq('challenge_id', activeChallengeId),
-          ]);
-          if (allProfs) {
-            setAllProfilesForAdmin(
-              allProfs.map((p: Record<string, unknown>) => ({
-                id: String(p.id),
-                email: String(p.email),
-                adminKnownName: String(p.admin_known_name),
-                publicDisplayName: String(p.public_display_name),
-                leaderboardOptIn: Boolean(p.leaderboard_opt_in),
-                membershipStatus: p.membership_status as MembershipStatus,
-                statusReason: (p.status_reason as string) ?? null,
-                statusUpdatedAt: String(p.status_updated_at ?? ''),
-              }))
-            );
-          }
-          if (allRecs) {
-            setAllAchievementsForAdmin(
-              allRecs.map((r: Record<string, unknown>) => ({
-                id: String(r.id),
-                challengeId: String(r.challenge_id),
-                studentId: String(r.student_id),
-                achievementDate: String(r.achievement_date),
-                quranTwoPages: Boolean(r.quran_two_pages),
-                ishaCongregation: Boolean(r.isha_congregation),
-                morningAdhkar: Boolean(r.morning_adhkar),
-                points: Number(r.points ?? 0),
-                revision: Number(r.revision ?? 1),
-                updatedAt: String(r.updated_at ?? ''),
-              }))
-            );
-          }
-        }
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'حدث خطأ أثناء الاتصال بالخادم.';
-      setAuthError(translateAuthError(msg));
-    } finally {
-      setLoadingSession(false);
-    }
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; requestId.current++; };
   }, []);
 
+  const runMutation = async (work: () => Promise<void>, onError: (message: string) => void) => {
+    if (mutationLock.current || !alive.current) return;
+    mutationLock.current = true;
+    setMutationBusy(true);
+    requestId.current++; // Invalidate background reads started before the mutation.
+    try { await work(); }
+    catch (error) { if (alive.current) onError(errorMessage(error)); }
+    finally {
+      mutationLock.current = false;
+      if (alive.current) setMutationBusy(false);
+    }
+  };
+
+  const fetchBootstrapData = useCallback(async () => {
+    if (!supabase || !identity) return;
+    if (bootstrapFlight.current === requestId.current) return;
+    const ticket = ++requestId.current;
+    bootstrapFlight.current = ticket;
+    const current = () => alive.current && ticket === requestId.current;
+    try {
+      const { data: boot, error } = await supabase.rpc('get_session_bootstrap');
+      if (error) throw error;
+      if (!boot || boot.user_id !== identity) throw new Error('تغيّرت الجلسة. يرجى تسجيل الدخول مجدداً.');
+      const callerIsAdmin = Boolean(boot.is_admin);
+      const ch = mapChallenge(boot.current_challenge);
+      const p = boot.profile ? mapProfile(boot.profile) : null;
+      const canRead = Boolean(ch.id && isValidUuid(ch.id) && (callerIsAdmin || p?.membershipStatus === 'approved'));
+      const [records, leaderboard, report] = await Promise.all([
+        canRead ? supabase.from('daily_achievements').select('*').eq('challenge_id', ch.id).eq('student_id', identity)
+          : Promise.resolve({ data: [], error: null }),
+        canRead ? supabase.rpc('get_leaderboard_and_group_stats', { p_challenge_id: ch.id })
+          : Promise.resolve({ data: null, error: null }),
+        callerIsAdmin ? supabase.rpc('get_admin_report', { p_challenge_id: isValidUuid(ch.id) ? ch.id : null })
+          : Promise.resolve({ data: null, error: null }),
+      ]);
+      if (records.error) throw records.error;
+      if (leaderboard.error) throw leaderboard.error;
+      if (report.error) throw report.error;
+      if (!current()) return;
+      setSessionUserId(identity);
+      setSessionEmail(boot.email ?? null);
+      setIsAdmin(callerIsAdmin);
+      setProfile(p);
+      setChallengeMembership(boot.challenge_membership_status ?? null);
+      setDamascusToday(boot.damascus_today);
+      setChallenge(ch);
+      if (configContext.current !== ch.id) { configDirty.current = false; configContext.current = ch.id; }
+      if (!configDirty.current) {
+        setCfgTitle(ch.title); setCfgStartDate(ch.startDate ?? ''); setCfgDuration(ch.durationDays);
+      }
+      if (p && !profileDirty.current) {
+        setAdminKnownNameInput(p.adminKnownName); setPublicDisplayNameInput(p.publicDisplayName);
+        setLeaderboardOptInInput(p.leaderboardOptIn);
+      }
+      setMyAchievements((records.data ?? []).map(mapAchievement));
+      const lb = leaderboard.data;
+      setServerLeaderboard(lb ? {
+        elapsedDays: Number(lb.elapsed_days), currentWeekNum: Number(lb.current_week_num),
+        collectiveGoalPct: Number(lb.collective_goal_pct), approvedStudentCount: Number(lb.approved_student_count),
+        groupTotalPoints: Number(lb.group_total_points), groupAvailablePoints: Number(lb.group_available_points),
+        groupCompletionPct: Number(lb.group_completion_pct), overallRankings: lb.overall_rankings ?? [],
+        weeklyRankings: lb.weekly_rankings ?? [], mySummary: lb.my_summary ?? null,
+      } : null);
+      const adminReport = report.data ? mapReport(report.data) : null;
+      setAllProfilesForAdmin(adminReport?.profiles ?? []);
+      setAllAchievementsForAdmin(adminReport?.achievements ?? []);
+      setReportGeneratedAt(adminReport?.generatedAt ?? null);
+      setDataError(null);
+    } catch (error) {
+      if (current()) setDataError(errorMessage(error));
+    } finally {
+      if (bootstrapFlight.current === ticket) bootstrapFlight.current = null;
+      if (current()) setLoadingSession(false);
+    }
+  }, [identity]);
+
   useEffect(() => {
-    if (!supabase) return;
-    fetchBootstrapData();
-    const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      fetchBootstrapData();
-    });
-    return () => sub.subscription.unsubscribe();
-  }, [fetchBootstrapData]);
+    if (!identity) return;
+    void fetchBootstrapData();
+    const refresh = () => {
+      if (!mutationLock.current && document.visibilityState === 'visible') void fetchBootstrapData();
+    };
+    const timer = window.setInterval(refresh, 15000);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+      requestId.current++;
+    };
+  }, [identity, fetchBootstrapData]);
+
+  useEffect(() => {
+    const checkDateRollover = () => {
+      const nowDamascus = getDamascusDateString(new Date());
+      setDamascusToday((prev) => (prev !== nowDamascus ? nowDamascus : prev));
+    };
+    const timer = window.setInterval(checkDateRollover, 15000);
+    window.addEventListener('focus', checkDateRollover);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', checkDateRollover);
+    };
+  }, []);
 
   const savedToday = useMemo(
-    () => myAchievements.find((a) => a.achievementDate === damascusToday) ?? null,
-    [myAchievements, damascusToday]
+    () => myAchievements.find((a) => a.challengeId === challenge.id && a.achievementDate === damascusToday) ?? null,
+    [myAchievements, damascusToday, challenge.id]
   );
 
   useEffect(() => {
+    const context = challenge.id + ':' + damascusToday;
+    if (draftContext.current !== context) {
+      if (draftDirty.current) setSaveFeedback('بدأ يوم أو تحدٍ جديد. لم تُنقل تعديلات اليوم السابق؛ راجع سجل اليوم قبل الحفظ.');
+      draftDirty.current = false;
+      draftContext.current = context;
+    }
+    if (draftDirty.current) return;
     if (savedToday) {
       setDraft({
         quranTwoPages: savedToday.quranTwoPages,
@@ -340,7 +322,7 @@ export default function App() {
       setDraft({ quranTwoPages: false, ishaCongregation: false, morningAdhkar: false });
       setLoadedRevision(0);
     }
-  }, [savedToday]);
+  }, [savedToday, challenge.id, damascusToday]);
 
   const hasUnsavedChanges = useMemo(() => {
     const bq = savedToday?.quranTwoPages ?? false;
@@ -381,7 +363,7 @@ export default function App() {
     return computeLeaderboardAndGroupStats(
       challenge,
       allProfilesForAdmin,
-      ['hajij94@gmail.com', ...(isAdmin && sessionEmail ? [sessionEmail] : [])],
+      allProfilesForAdmin.filter((p) => p.isAdmin).map((p) => p.email),
       allAchievementsForAdmin,
       sessionUserId,
       damascusToday
@@ -390,7 +372,6 @@ export default function App() {
     challenge,
     allProfilesForAdmin,
     isAdmin,
-    sessionEmail,
     allAchievementsForAdmin,
     sessionUserId,
     damascusToday,
@@ -429,177 +410,177 @@ export default function App() {
         if (error) throw error;
       } else {
         // Sign Up new account
-        if (
-          adminKnownNameInput.trim().length < 2 ||
-          publicDisplayNameInput.trim().length < 2
-        ) {
-          setAuthError(
-            'يرجى إدخال الاسم الكامل لدى المشرف والاسم الظاهر في اللوحة (حرفان على الأقل).'
-          );
-          setAuthSubmitting(false);
-          return;
-        }
+        const nameError = validateProfileNames(adminKnownNameInput, publicDisplayNameInput);
+        if (nameError) throw new Error(nameError);
 
         const { data: signUpData, error: signUpErr } = await supabase.auth.signUp({
           email: cleanEmail,
           password: passwordInput,
+          options: {
+            data: {
+              admin_known_name: adminKnownNameInput.trim(),
+              public_display_name: publicDisplayNameInput.trim(),
+              leaderboard_opt_in: leaderboardOptInInput,
+            },
+          },
         });
         if (signUpErr) throw signUpErr;
 
-        if (signUpData.session) {
-          // Immediately create the student's profile row via RPC
-          const { error: profErr } = await supabase.rpc('upsert_my_profile', {
-            p_admin_known_name: adminKnownNameInput.trim(),
-            p_public_display_name: publicDisplayNameInput.trim(),
-            p_leaderboard_opt_in: leaderboardOptInInput,
-          });
-          if (profErr) throw profErr;
-          await fetchBootstrapData();
-        } else {
+        if (!signUpData.session) {
           setAuthSuccessMsg(
-            'تم إنشاء الحساب! إذا كان تأكيد البريد مفعلاً، يرجى فتح الرسالة المرسلة إلى بريدك الإلكتروني، أو إيقاف Confirm Email من لوحة Supabase ثم تسجيل الدخول.'
+            'تم إنشاء الحساب بنجاح! إذا كان خيار تأكيد البريد مفعّلاً في Supabase، يرجى فتح الرسالة في بريدك للتأكيد، أو تسجيل الدخول فوراً إذا كان معطلاً.'
           );
           setAuthFormMode('sign_in');
         }
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'تعذّر إتمام المصادقة.';
+      const msg = errorMessage(err);
       setAuthError(translateAuthError(msg));
     } finally {
       setAuthSubmitting(false);
     }
   };
 
-  const handleSignOut = async () => {
-    if (supabase) {
-      await supabase.auth.signOut();
-    }
+  const resetAllSessionState = useCallback(() => {
     setSessionUserId(null);
+    setSessionEmail(null);
+    setIsAdmin(false);
     setProfile(null);
-  };
-
-  const handleUpsertProfile = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!supabase) return;
-    setProfileFeedback(null);
-    const { data, error } = await supabase.rpc('upsert_my_profile', {
-      p_admin_known_name: adminKnownNameInput.trim(),
-      p_public_display_name: publicDisplayNameInput.trim(),
-      p_leaderboard_opt_in: leaderboardOptInInput,
-    });
-    if (error) {
-      setProfileFeedback({ type: 'error', text: error.message });
-      return;
-    }
-    if (data) {
-      setProfileFeedback({
-        type: 'success',
-        text: 'تم حفظ بيانات الملف الشخصي وإعدادات الخصوصية بنجاح.',
-      });
-      await fetchBootstrapData();
-    }
-  };
-
-  const handleSaveToday = async () => {
-    if (!supabase) return;
-    setSaveStatus('saving');
+    setChallengeMembership(null);
+    setChallenge(EMPTY_CHALLENGE);
+    setMyAchievements([]);
+    setAllProfilesForAdmin([]);
+    setAllAchievementsForAdmin([]);
+    setServerLeaderboard(null);
+    setDraft({ quranTwoPages: false, ishaCongregation: false, morningAdhkar: false });
+    setLoadedRevision(0);
+    setSaveStatus('idle');
     setSaveFeedback(null);
+    setAdminKnownNameInput('');
+    setPublicDisplayNameInput('');
+    setLeaderboardOptInInput(false);
+    setProfileFeedback(null);
+    setAdminBanner(null);
+    setDataError(null);
+    profileDirty.current = false;
+    configDirty.current = false;
+    draftDirty.current = false;
+    draftContext.current = '';
+    configContext.current = '';
+  }, []);
 
-    const { data, error } = await supabase.rpc('save_today_achievement', {
-      p_challenge_id: challenge.id,
-      p_target_date: damascusToday,
-      p_quran_two_pages: draft.quranTwoPages,
-      p_isha_congregation: draft.ishaCongregation,
-      p_morning_adhkar: draft.morningAdhkar,
-      p_expected_revision: loadedRevision,
-    });
-
-    if (error) {
-      setSaveStatus('error');
-      setSaveFeedback(error.message);
-      return;
+  const handleSignOut = () => runMutation(async () => {
+    if (supabase) {
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
     }
+    resetAllSessionState();
+  }, (text) => setDataError(text));
 
-    if (data) {
-      setSaveStatus('success');
-      setSaveFeedback('تم حفظ إنجاز اليوم بنجاح. يمكنك التعديل حتى منتصف الليل بتوقيت دمشق.');
+  const handleUpsertProfile = (e: React.FormEvent) => {
+    e.preventDefault();
+    return runMutation(async () => {
+      setProfileFeedback(null);
+      const nameError = validateProfileNames(adminKnownNameInput, publicDisplayNameInput);
+      if (nameError) throw new Error(nameError);
+      const { error } = await supabase!.rpc('upsert_my_profile', {
+        p_admin_known_name: adminKnownNameInput.trim(), p_public_display_name: publicDisplayNameInput.trim(),
+        p_leaderboard_opt_in: leaderboardOptInInput,
+      });
+      if (error) throw error;
+      if (!alive.current) return;
+      profileDirty.current = false;
+      setProfileFeedback({ type: 'success', text: 'تم حفظ الملف الشخصي بنجاح.' });
       await fetchBootstrapData();
-    }
+    }, (text) => setProfileFeedback({ type: 'error', text }));
   };
 
-  const handleAdminSetMemberStatus = async (
-    studentId: string,
-    newStatus: MembershipStatus
-  ) => {
-    if (!supabase || !isAdmin) return;
+  const handleSaveToday = () => runMutation(async () => {
+    if (!isValidUuid(challenge.id)) {
+      throw new Error('لا يوجد تحدٍ نشط حالياً.');
+    }
+    setSaveStatus('saving'); setSaveFeedback(null);
+    const { error } = await supabase!.rpc('save_today_achievement', {
+      p_challenge_id: challenge.id, p_target_date: damascusToday,
+      p_quran_two_pages: draft.quranTwoPages, p_isha_congregation: draft.ishaCongregation,
+      p_morning_adhkar: draft.morningAdhkar, p_expected_revision: loadedRevision,
+    });
+    if (!alive.current) return;
+    if (error) {
+      // Refresh status/date immediately; dirty same-day drafts retain their old revision until reviewed.
+      await fetchBootstrapData();
+      throw error;
+    }
+    draftDirty.current = false;
+    setSaveStatus('success'); setSaveFeedback('تم حفظ إنجاز اليوم بنجاح.');
+    await fetchBootstrapData();
+  }, (text) => { setSaveStatus('error'); setSaveFeedback(text); });
+
+  const handleAdminSetMemberStatus = (studentId: string, newStatus: MembershipStatus) => runMutation(async () => {
+    if (!isAdmin) return;
     setAdminBanner(null);
-    const { error } = await supabase.rpc('admin_set_membership_status', {
-      p_student_id: studentId,
-      p_challenge_id: challenge.id,
-      p_new_status: newStatus,
+    const challengeId = isValidUuid(challenge.id) ? challenge.id : null;
+    const { error } = await supabase!.rpc('admin_set_membership_status', {
+      p_student_id: studentId, p_challenge_id: challengeId, p_new_status: newStatus,
       p_reason: newStatus === 'suspended' ? 'إيقاف مؤقت من مشرف الحلقة' : null,
     });
-    if (error) {
-      setAdminBanner({ type: 'error', text: error.message });
-      return;
-    }
-    setAdminBanner({
-      type: 'success',
-      text: 'تم تحديث حالة العضوية بنجاح ويسري التغيير فوراً.',
-    });
+    if (error) throw error;
+    if (!alive.current) return;
+    setAdminBanner({ type: 'success', text: 'تم تحديث حالة العضوية.' });
     await fetchBootstrapData();
-  };
+  }, (text) => setAdminBanner({ type: 'error', text }));
 
-  const handleAdminSaveChallenge = async (e: React.FormEvent) => {
+  const handleAdminSaveChallenge = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!supabase || !isAdmin) return;
-    setAdminBanner(null);
-    const { error } = await supabase.rpc('admin_configure_challenge', {
-      p_challenge_id: challenge.id,
-      p_title: cfgTitle.trim(),
-      p_start_date: cfgStartDate.trim() || null,
-      p_duration_days: cfgDuration,
-    });
-    if (error) {
-      setAdminBanner({ type: 'error', text: error.message });
-      return;
-    }
-    setAdminBanner({ type: 'success', text: 'تم حفظ إعدادات التحدي بنجاح.' });
-    await fetchBootstrapData();
+    return runMutation(async () => {
+      if (!isAdmin || !isValidUuid(challenge.id)) return;
+      const challengeId = isValidUuid(challenge.id) ? challenge.id : null;
+      const { error } = await supabase!.rpc('admin_configure_challenge', {
+        p_challenge_id: challengeId, p_title: cfgTitle.trim(),
+        p_start_date: cfgStartDate || null, p_duration_days: cfgDuration,
+      });
+      if (error) throw error;
+      if (!alive.current) return;
+      configDirty.current = false;
+      setAdminBanner({ type: 'success', text: 'تم حفظ إعدادات التحدي.' });
+      await fetchBootstrapData();
+    }, (text) => setAdminBanner({ type: 'error', text }));
   };
 
-  const handleAdminArchiveChallenge = async () => {
-    if (!supabase || !isAdmin) return;
-    setAdminBanner(null);
-    const { error } = await supabase.rpc('admin_archive_and_create_challenge', {
-      p_current_challenge_id: challenge.id,
-      p_new_title: newChallengeTitle.trim() || 'تعالَ نؤمن ساعة',
-      p_new_start_date: newChallengeStartDate.trim() || null,
-      p_new_duration_days: 30,
-    });
-    if (error) {
-      setAdminBanner({ type: 'error', text: error.message });
-      return;
-    }
-    setShowArchiveConfirm(false);
-    setAdminBanner({
-      type: 'success',
-      text: 'تمت أرشفة التحدي الحالي مع الاحتفاظ بجميع السجلات، وتم فتح الدورة الجديدة بنجاح.',
-    });
-    await fetchBootstrapData();
-  };
-
-  const handleAdminExportCsv = () => {
+  const handleAdminArchiveChallenge = () => runMutation(async () => {
     if (!isAdmin) return;
-    const rows = allProfilesForAdmin
-      .filter((p) => p.email.toLowerCase() !== 'hajij94@gmail.com')
+    const challengeId = isValidUuid(challenge.id) ? challenge.id : null;
+    const { error } = await supabase!.rpc('admin_archive_and_create_challenge', {
+      p_current_challenge_id: challengeId, p_new_title: newChallengeTitle.trim(),
+      p_new_start_date: newChallengeStartDate || null, p_new_duration_days: 30,
+    });
+    if (error) throw error;
+    if (!alive.current) return;
+    setShowArchiveConfirm(false);
+    setAdminBanner({ type: 'success', text: 'تم فتح الدورة الجديدة مع الاحتفاظ بالسجلات السابقة.' });
+    await fetchBootstrapData();
+  }, (text) => setAdminBanner({ type: 'error', text }));
+
+  const handleAdminExportCsv = () => runMutation(async () => {
+    if (!isAdmin) return;
+    const challengeId = isValidUuid(challenge.id) ? challenge.id : null;
+    const { data, error } = await supabase!.rpc('get_admin_report', { p_challenge_id: challengeId });
+    if (error) throw error;
+    if (!alive.current) return;
+    const fresh = mapReport(data);
+    const reportWindow = evaluateChallengeWindow(fresh.challenge, fresh.today);
+    setReportGeneratedAt(fresh.generatedAt);
+    setAllProfilesForAdmin(fresh.profiles);
+    setAllAchievementsForAdmin(fresh.achievements);
+    const rows = fresh.profiles
+      .filter((p) => !p.isAdmin)
       .map((p) => {
-        const recs = allAchievementsForAdmin.filter((a) => a.studentId === p.id);
+        const recs = fresh.achievements.filter((a) => a.studentId === p.id);
         const totalPoints = recs.reduce((s, r) => s + computeActivityPoints(r), 0);
-        const avail = windowInfo.elapsedDays * 3;
+        const avail = reportWindow.elapsedDays * 3;
         const completionPct =
           avail > 0 ? Number(((totalPoints * 100) / avail).toFixed(1)) : 0;
-        const streakDays = calculateStreakDays(challenge, recs, damascusToday);
+        const streakDays = calculateStreakDays(fresh.challenge, recs, fresh.today);
         const fullDaysCount = recs.filter((r) => computeActivityPoints(r) === 3).length;
         const quranCount = recs.filter((r) => r.quranTwoPages).length;
         const ishaCount = recs.filter((r) => r.ishaCongregation).length;
@@ -632,12 +613,12 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `تقرير-حلقة-أبي-بكر-الصديق-${damascusToday}.csv`;
+    a.download = `تقرير-حلقة-أبي-بكر-الصديق-${fresh.today}.csv`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  };
+  }, (text) => setAdminBanner({ type: 'error', text }));
 
   if (loadingSession) {
     return (
@@ -684,7 +665,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={handleSignOut}
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#FDF2F2] text-[#7F2323] border border-[#F5C2C2] text-xs font-semibold"
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#FDF2F2] text-[#7F2323] border border-[#F5C2C2] text-xs font-semibold hover:bg-[#FBE8E8] transition"
               >
                 <LogOut className="w-4 h-4" />
                 <span>خروج</span>
@@ -695,19 +676,23 @@ export default function App() {
       </header>
 
       <main className="flex-1 max-w-5xl w-full mx-auto px-4 py-6 pb-20">
+        <fieldset disabled={mutationBusy} className="contents">
+        {dataError ? <section role="alert" className="p-6 bg-white rounded-2xl">
+          <p>{dataError}</p><button type="button" onClick={() => void fetchBootstrapData()}>إعادة المحاولة</button>
+        </section> : <>
         {!sessionUserId ? (
           <section className="max-w-2xl mx-auto bg-white rounded-3xl p-6 sm:p-8 border border-[#E6DEC8] shadow-sm space-y-6">
             <div>
               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#EAF3EE] text-[#144734] text-xs font-semibold mb-3">
                 <Sparkles className="w-3.5 h-3.5 text-[#B8922A]" />
-                <span>حلقة سيدنا أبو بكر الصديق • برنامج تطوعي لمدة 30 يوماً</span>
+                <span>حلقة سيدنا أبو بكر الصديق • برنامج متابعة يومية تطوعي</span>
               </div>
               <h2 className="text-2xl sm:text-3xl font-bold text-[#144734]">
                 مرحباً بك في تحدي «تعالَ نؤمن ساعة»
               </h2>
               <p className="text-sm text-[#364940] mt-2 leading-relaxed">
-                مساحة أخوية خاصة لطلاب الحلقة، نتعاون فيها على بناء عادات إيمانية يومية ثابتة مدتها{' '}
-                <strong>30 يوماً</strong>. المشاركة <strong>تطوعية بالكامل</strong>، وغايتنا منها
+                مساحة أخوية خاصة لطلاب الحلقة، نتعاون فيها على بناء عادات إيمانية يومية ثابتة.
+                المشاركة <strong>تطوعية بالكامل</strong>، وغايتنا منها
                 التشجيع المتبادل ودوام العمل وإن قلّ.
               </p>
               <blockquote className="mt-4 p-4 rounded-2xl bg-[#FAF7F0] border-r-4 border-[#B8922A] text-sm font-medium text-[#144734]">
@@ -715,9 +700,25 @@ export default function App() {
               </blockquote>
             </div>
 
+            {!isSupabaseConfigured && (
+              <div
+                role="alert"
+                className="p-4 rounded-2xl bg-[#FFF9E6] border border-[#E6C665] text-[#7A5C12] text-xs space-y-1.5"
+              >
+                <p className="font-bold flex items-center gap-1.5">
+                  <AlertCircle className="w-4 h-4 text-[#B8922A] shrink-0" />
+                  <span>تنبيه: يلزم ضبط متغيرات الربط مع Supabase</span>
+                </p>
+                <p className="leading-relaxed">
+                  أضف <code>VITE_SUPABASE_URL</code> و <code>VITE_SUPABASE_PUBLISHABLE_KEY</code> في
+                  إعدادات الاستضافة (Vercel) أو في ملف <code>.env.local</code> محلياً.
+                </p>
+              </div>
+            )}
+
             <div className="space-y-2.5">
               <h3 className="text-xs sm:text-sm font-bold text-[#162921]">
-                الأنشطة اليومية الثلاثة (3 نقاط يومياً • 90 نقطة خلال 30 يوماً):
+                الأنشطة اليومية الثلاثة (3 نقاط يومياً):
               </h3>
               {DAILY_ACTIVITIES_META.map((act, idx) => (
                 <div
@@ -799,7 +800,7 @@ export default function App() {
                     value={emailInput}
                     onChange={(e) => setEmailInput(e.target.value)}
                     placeholder="student@gmail.com"
-                    className="w-full min-h-[46px] px-3.5 py-2 rounded-xl border border-[#D5CBB4] text-sm text-left"
+                    className="w-full min-h-[46px] px-3.5 py-2 rounded-xl border border-[#D5CBB4] text-sm text-left focus:outline-none focus:ring-2 focus:ring-[#144734]"
                   />
                 </div>
 
@@ -816,7 +817,7 @@ export default function App() {
                       value={passwordInput}
                       onChange={(e) => setPasswordInput(e.target.value)}
                       placeholder="••••••••"
-                      className="w-full min-h-[46px] px-3.5 py-2 rounded-xl border border-[#D5CBB4] text-sm text-left"
+                      className="w-full min-h-[46px] px-3.5 py-2 rounded-xl border border-[#D5CBB4] text-sm text-left focus:outline-none focus:ring-2 focus:ring-[#144734]"
                     />
                     <button
                       type="button"
@@ -837,10 +838,12 @@ export default function App() {
                       <input
                         type="text"
                         required
-                        value={adminKnownNameInput}
-                        onChange={(e) => setAdminKnownNameInput(e.target.value)}
+                        minLength={2}
+                      maxLength={80}
+                      value={adminKnownNameInput}
+                        onChange={(e) => { profileDirty.current = true; setAdminKnownNameInput(e.target.value); }}
                         placeholder="مثال: عبد الله بن مسعود"
-                        className="w-full min-h-[46px] px-3.5 py-2 rounded-xl border border-[#D5CBB4] text-sm"
+                        className="w-full min-h-[46px] px-3.5 py-2 rounded-xl border border-[#D5CBB4] text-sm focus:outline-none focus:ring-2 focus:ring-[#144734]"
                       />
                     </div>
 
@@ -851,10 +854,12 @@ export default function App() {
                       <input
                         type="text"
                         required
-                        value={publicDisplayNameInput}
-                        onChange={(e) => setPublicDisplayNameInput(e.target.value)}
+                        minLength={2}
+                      maxLength={50}
+                      value={publicDisplayNameInput}
+                        onChange={(e) => { profileDirty.current = true; setPublicDisplayNameInput(e.target.value); }}
                         placeholder="مثال: أبو عبد الرحمن"
-                        className="w-full min-h-[46px] px-3.5 py-2 rounded-xl border border-[#D5CBB4] text-sm"
+                        className="w-full min-h-[46px] px-3.5 py-2 rounded-xl border border-[#D5CBB4] text-sm focus:outline-none focus:ring-2 focus:ring-[#144734]"
                       />
                     </div>
 
@@ -862,7 +867,7 @@ export default function App() {
                       <input
                         type="checkbox"
                         checked={leaderboardOptInInput}
-                        onChange={(e) => setLeaderboardOptInInput(e.target.checked)}
+                        onChange={(e) => { profileDirty.current = true; setLeaderboardOptInInput(e.target.checked); }}
                         className="mt-0.5 w-4 h-4 accent-[#144734]"
                       />
                       <span>
@@ -894,6 +899,21 @@ export default function App() {
               <span>إعداد الملف الشخصي وطلب الانضمام</span>
             </div>
             <h2 className="text-xl font-bold text-[#144734]">إكمال بيانات الانضمام للحلقة</h2>
+
+            {profileFeedback && (
+              <div
+                role="alert"
+                className={`p-3.5 rounded-2xl text-xs flex items-start gap-2 ${
+                  profileFeedback.type === 'success'
+                    ? 'bg-[#EAF3EE] border border-[#144734]/20 text-[#144734]'
+                    : 'bg-[#FDF2F2] border border-[#F5C2C2] text-[#7F2323]'
+                }`}
+              >
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{profileFeedback.text}</span>
+              </div>
+            )}
+
             <form onSubmit={handleUpsertProfile} className="space-y-4">
               <div>
                 <label className="block text-xs font-semibold mb-1">
@@ -902,9 +922,11 @@ export default function App() {
                 <input
                   type="text"
                   required
-                  value={adminKnownNameInput}
-                  onChange={(e) => setAdminKnownNameInput(e.target.value)}
-                  className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm"
+                  minLength={2}
+                      maxLength={80}
+                      value={adminKnownNameInput}
+                  onChange={(e) => { profileDirty.current = true; setAdminKnownNameInput(e.target.value); }}
+                  className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm focus:outline-none focus:ring-2 focus:ring-[#144734]"
                 />
               </div>
               <div>
@@ -914,32 +936,44 @@ export default function App() {
                 <input
                   type="text"
                   required
-                  value={publicDisplayNameInput}
-                  onChange={(e) => setPublicDisplayNameInput(e.target.value)}
-                  className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm"
+                  minLength={2}
+                      maxLength={50}
+                      value={publicDisplayNameInput}
+                  onChange={(e) => { profileDirty.current = true; setPublicDisplayNameInput(e.target.value); }}
+                  className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm focus:outline-none focus:ring-2 focus:ring-[#144734]"
                 />
               </div>
               <label className="flex items-center gap-2 text-xs cursor-pointer">
                 <input
                   type="checkbox"
                   checked={leaderboardOptInInput}
-                  onChange={(e) => setLeaderboardOptInInput(e.target.checked)}
+                  onChange={(e) => { profileDirty.current = true; setLeaderboardOptInInput(e.target.checked); }}
                 />
                 <span>الظهور الاختياري في لوحة الصدارة العامة</span>
               </label>
               <button
                 type="submit"
-                className="w-full min-h-[48px] rounded-xl bg-[#144734] text-white font-bold text-sm"
+                className="w-full min-h-[48px] rounded-xl bg-[#144734] hover:bg-[#0D3123] text-white font-bold text-sm transition"
               >
                 إرسال طلب الانضمام
               </button>
             </form>
           </section>
         ) : profile.membershipStatus === 'pending' && !isAdmin ? (
-          <section className="max-w-xl mx-auto bg-white rounded-3xl p-6 border border-[#D4AF37] space-y-4">
-            <div className="flex items-center gap-2 text-[#94721B] font-bold">
-              <Clock className="w-5 h-5" />
-              <h2>طلب انضمامك قيد المراجعة من مشرف الحلقة</h2>
+          <section className="max-w-xl mx-auto bg-white rounded-3xl p-6 border border-[#D4AF37] space-y-4 shadow-sm">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-[#94721B] font-bold">
+                <Clock className="w-5 h-5" />
+                <h2>طلب انضمامك قيد المراجعة من مشرف الحلقة</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => void fetchBootstrapData()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#FAF7F0] text-[#144734] border border-[#144734]/30 text-xs font-bold hover:bg-[#EAF3EE] transition"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>فحص القبول</span>
+              </button>
             </div>
             <p className="text-xs text-[#4A5D54] leading-relaxed">
               أهلاً بك يا <strong>{profile.adminKnownName}</strong>. لحين موافقة المشرف على عضويتك،
@@ -947,7 +981,13 @@ export default function App() {
               ملفك الشخصي أدناه في أي وقت.
             </p>
             {profileFeedback && (
-              <div className="p-3 rounded-xl bg-[#EAF3EE] text-[#144734] text-xs">
+              <div
+                className={`p-3 rounded-xl text-xs ${
+                  profileFeedback.type === 'success'
+                    ? 'bg-[#EAF3EE] text-[#144734]'
+                    : 'bg-[#FDF2F2] text-[#7F2323]'
+                }`}
+              >
                 {profileFeedback.text}
               </div>
             )}
@@ -956,31 +996,35 @@ export default function App() {
                 <label className="block text-xs font-semibold mb-1">الاسم لدى المشرف</label>
                 <input
                   type="text"
-                  value={adminKnownNameInput}
-                  onChange={(e) => setAdminKnownNameInput(e.target.value)}
-                  className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm"
+                  minLength={2}
+                      maxLength={80}
+                      value={adminKnownNameInput}
+                  onChange={(e) => { profileDirty.current = true; setAdminKnownNameInput(e.target.value); }}
+                  className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm focus:outline-none focus:ring-2 focus:ring-[#144734]"
                 />
               </div>
               <div>
                 <label className="block text-xs font-semibold mb-1">الاسم الظاهر في اللوحة</label>
                 <input
                   type="text"
-                  value={publicDisplayNameInput}
-                  onChange={(e) => setPublicDisplayNameInput(e.target.value)}
-                  className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm"
+                  minLength={2}
+                      maxLength={50}
+                      value={publicDisplayNameInput}
+                  onChange={(e) => { profileDirty.current = true; setPublicDisplayNameInput(e.target.value); }}
+                  className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm focus:outline-none focus:ring-2 focus:ring-[#144734]"
                 />
               </div>
-              <label className="flex items-center gap-2 text-xs">
+              <label className="flex items-center gap-2 text-xs cursor-pointer">
                 <input
                   type="checkbox"
                   checked={leaderboardOptInInput}
-                  onChange={(e) => setLeaderboardOptInInput(e.target.checked)}
+                  onChange={(e) => { profileDirty.current = true; setLeaderboardOptInInput(e.target.checked); }}
                 />
                 <span>الظهور في لوحة الصدارة بعد التفعيل</span>
               </label>
               <button
                 type="submit"
-                className="w-full min-h-[44px] rounded-xl bg-[#144734] text-white font-bold text-xs"
+                className="w-full min-h-[44px] rounded-xl bg-[#144734] hover:bg-[#0D3123] text-white font-bold text-xs transition"
               >
                 حفظ تعديلات الملف الشخصي
               </button>
@@ -1015,8 +1059,10 @@ export default function App() {
                     key={t.id}
                     type="button"
                     onClick={() => setActiveTab(t.id)}
-                    className={`flex-1 min-w-[74px] min-h-[44px] px-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 ${
-                      activeTab === t.id ? 'bg-[#144734] text-white' : 'text-[#364940]'
+                    className={`flex-1 min-w-[74px] min-h-[44px] px-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition ${
+                      activeTab === t.id
+                        ? 'bg-[#144734] text-white shadow-sm'
+                        : 'text-[#364940] hover:bg-[#FAF7F0]'
                     }`}
                   >
                     <Icon className="w-4 h-4 shrink-0" />
@@ -1031,7 +1077,9 @@ export default function App() {
                 <section className="bg-white rounded-3xl p-6 border border-[#E6DEC8] space-y-4">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
-                      <h2 className="text-xl font-bold text-[#144734]">{profile.adminKnownName}</h2>
+                      <h2 className="text-xl font-bold text-[#144734]">
+                        {profile?.adminKnownName ?? 'طالب الحلقة'}
+                      </h2>
                       <p className="text-xs text-[#5B6E65]">
                         تاريخ اليوم (توقيت دمشق): {damascusToday}
                       </p>
@@ -1045,14 +1093,24 @@ export default function App() {
                       </span>
                     )}
                     {windowInfo.state === 'upcoming' && (
-                      <span className="px-4 py-2 rounded-2xl bg-[#FBF6E8] text-[#94721B] text-xs font-bold">
+                      <span className="px-4 py-2 rounded-2xl bg-[#FBF6E8] text-[#94721B] text-xs font-bold border border-[#D4AF37]/30">
                         {challenge.startDate
                           ? `يبدأ التحدي في ${challenge.startDate}`
                           : 'بانتظار تحديد تاريخ البدء من المشرف'}
                       </span>
                     )}
+                    {windowInfo.state === 'completed' && (
+                      <span className="px-4 py-2 rounded-2xl bg-[#EAF3EE] text-[#144734] text-xs font-bold border border-[#144734]/30">
+                        اكتملت أيام الدورة الحالية
+                      </span>
+                    )}
                   </div>
 
+                  {!isAdmin && challengeMembership !== 'approved' && <p role="status">عضويتك في هذا التحدي بانتظار موافقة المشرف.</p>}
+                  {saveStatus === 'error' && <button type="button" onClick={() => {
+                    draftDirty.current = false;
+                    void fetchBootstrapData();
+                  }}>تحميل أحدث سجل واستبدال التعديلات المحلية</button>}
                   {hasUnsavedChanges && (
                     <div className="p-3.5 rounded-xl bg-[#FBF6E8] border border-[#D4AF37] text-xs font-semibold text-[#7A5C12]">
                       لديك تغييرات غير محفوظة — اضغط على زر «حفظ إنجاز اليوم» لتأكيدها.
@@ -1062,13 +1120,14 @@ export default function App() {
                   <div className="space-y-3">
                     {DAILY_ACTIVITIES_META.map((act) => {
                       const checked = draft[act.key];
-                      const disabled = windowInfo.state !== 'active';
+                      const disabled = mutationBusy || windowInfo.state !== 'active' || (!isAdmin && challengeMembership !== 'approved');
                       return (
                         <button
                           key={act.key}
                           type="button"
                           disabled={disabled}
                           onClick={() => {
+                            draftDirty.current = true;
                             setDraft((prev) => ({ ...prev, [act.key]: !prev[act.key] }));
                             setSaveStatus('idle');
                           }}
@@ -1076,7 +1135,7 @@ export default function App() {
                             checked
                               ? 'bg-[#EAF3EE]/70 border-[#144734]'
                               : 'bg-[#FAF7F0]/60 border-[#E6DEC8]'
-                          } ${disabled ? 'opacity-60 cursor-not-allowed' : ''}`}
+                          } ${disabled ? 'opacity-60 cursor-not-allowed' : 'hover:border-[#144734]/60'}`}
                         >
                           <div>
                             <p className="font-bold text-sm sm:text-base text-[#162921]">
@@ -1085,7 +1144,7 @@ export default function App() {
                             <p className="text-xs text-[#5B6E65] mt-0.5">{act.subtitle}</p>
                           </div>
                           <div
-                            className={`w-7 h-7 rounded-xl flex items-center justify-center border-2 ${
+                            className={`w-7 h-7 rounded-xl flex items-center justify-center border-2 transition ${
                               checked
                                 ? 'bg-[#144734] border-[#144734] text-white'
                                 : 'bg-white border-[#B9B09B]'
@@ -1100,10 +1159,10 @@ export default function App() {
 
                   {saveFeedback && (
                     <div
-                      className={`p-3.5 rounded-xl text-xs ${
+                      className={`p-3.5 rounded-xl text-xs font-semibold ${
                         saveStatus === 'success'
-                          ? 'bg-[#EAF3EE] text-[#144734]'
-                          : 'bg-[#FDF2F2] text-[#7F2323]'
+                          ? 'bg-[#EAF3EE] text-[#144734] border border-[#144734]/20'
+                          : 'bg-[#FDF2F2] text-[#7F2323] border border-[#F5C2C2]'
                       }`}
                     >
                       {saveFeedback}
@@ -1113,8 +1172,8 @@ export default function App() {
                   <button
                     type="button"
                     onClick={handleSaveToday}
-                    disabled={saveStatus === 'saving' || windowInfo.state !== 'active'}
-                    className="w-full min-h-[50px] rounded-2xl bg-[#144734] hover:bg-[#0D3123] disabled:opacity-50 text-white font-bold text-sm transition"
+                    disabled={mutationBusy || windowInfo.state !== 'active' || (!isAdmin && challengeMembership !== 'approved')}
+                    className="w-full min-h-[50px] rounded-2xl bg-[#144734] hover:bg-[#0D3123] disabled:opacity-50 text-white font-bold text-sm transition shadow-sm"
                   >
                     {saveStatus === 'saving' ? 'جاري الحفظ...' : 'حفظ إنجاز اليوم'}
                   </button>
@@ -1134,7 +1193,7 @@ export default function App() {
                   <div className="bg-white rounded-2xl p-4 border border-[#E6DEC8]">
                     <span className="text-xs text-[#5B6E65]">نقاط الأسبوع الحالي</span>
                     <p className="text-2xl font-bold text-[#144734] mt-1">
-                      {dashboardMetrics.currentWeekPoints} / 21
+                      {dashboardMetrics.currentWeekPoints} / {dashboardMetrics.currentWeekMaxPoints}
                     </p>
                   </div>
                   <div className="bg-white rounded-2xl p-4 border border-[#E6DEC8]">
@@ -1163,14 +1222,14 @@ export default function App() {
                 </section>
 
                 <section className="bg-white rounded-3xl p-5 border border-[#E6DEC8] space-y-4">
-                  <h3 className="text-base font-bold text-[#162921]">تقويم الـ 30 يوماً</h3>
+                  <h3 className="text-base font-bold text-[#162921]">تقويم الـ {challenge.durationDays} يوماً</h3>
                   <div className="grid grid-cols-5 sm:grid-cols-10 gap-2">
                     {dashboardMetrics.calendarDays.map((day) => (
                       <button
                         key={day.dayNumber}
                         type="button"
                         onClick={() => setSelectedDayNum(day.dayNumber)}
-                        className={`min-h-[52px] rounded-xl border p-1.5 flex flex-col items-center justify-center text-xs ${
+                        className={`min-h-[52px] rounded-xl border p-1.5 flex flex-col items-center justify-center text-xs transition ${
                           !day.isFuture && day.points === 3
                             ? 'bg-[#144734] text-white border-[#144734]'
                             : !day.isFuture && day.points > 0
@@ -1222,13 +1281,41 @@ export default function App() {
                   </div>
                   <div className="h-3.5 rounded-full bg-[#F3EDE0] overflow-hidden">
                     <div
-                      className="h-full bg-[#144734] rounded-full"
+                      className="h-full bg-[#144734] rounded-full transition-all duration-500"
                       style={{
                         width: `${Math.min(100, serverLeaderboard?.groupCompletionPct ?? 0)}%`,
                       }}
                     />
                   </div>
                 </section>
+
+                {serverLeaderboard?.mySummary && (
+                  <div className="p-4 rounded-2xl bg-[#EAF3EE] border border-[#144734]/30 flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div>
+                      <span className="font-bold text-[#144734]">ترتيبك الشخصي:</span>{' '}
+                      <span>
+                        المركز #
+                        {leaderboardScope === 'overall'
+                          ? serverLeaderboard.mySummary.overall_rank
+                          : serverLeaderboard.mySummary.week_rank}{' '}
+                        (
+                        {leaderboardScope === 'overall'
+                          ? serverLeaderboard.mySummary.total_points
+                          : serverLeaderboard.mySummary.week_points}{' '}
+                        نقطة)
+                      </span>
+                      {!serverLeaderboard.mySummary.leaderboard_opt_in && (
+                        <p className="text-[#5B6E65] text-[11px] mt-0.5">
+                          اسمك غير ظاهر للآخرين في لوحة الصدارة العامة (يمكنك تفعيل الظهور من تبويب
+                          الملف الشخصي).
+                        </p>
+                      )}
+                    </div>
+                    <span className="px-2.5 py-1 rounded-full bg-white text-[#144734] font-bold border border-[#144734]/20">
+                      {serverLeaderboard.mySummary.display_name}
+                    </span>
+                  </div>
+                )}
 
                 <section className="bg-white rounded-3xl p-6 border border-[#E6DEC8] space-y-4">
                   <div className="flex items-center justify-between">
@@ -1237,8 +1324,10 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => setLeaderboardScope('overall')}
-                        className={`px-3 py-1 rounded-lg text-xs font-bold ${
-                          leaderboardScope === 'overall' ? 'bg-[#144734] text-white' : ''
+                        className={`px-3 py-1 rounded-lg text-xs font-bold transition ${
+                          leaderboardScope === 'overall'
+                            ? 'bg-[#144734] text-white shadow-sm'
+                            : 'text-[#364940]'
                         }`}
                       >
                         الترتيب العام
@@ -1246,8 +1335,10 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => setLeaderboardScope('weekly')}
-                        className={`px-3 py-1 rounded-lg text-xs font-bold ${
-                          leaderboardScope === 'weekly' ? 'bg-[#144734] text-white' : ''
+                        className={`px-3 py-1 rounded-lg text-xs font-bold transition ${
+                          leaderboardScope === 'weekly'
+                            ? 'bg-[#144734] text-white shadow-sm'
+                            : 'text-[#364940]'
                         }`}
                       >
                         الأسبوع الحالي
@@ -1256,43 +1347,53 @@ export default function App() {
                   </div>
 
                   <div className="space-y-2">
-                    {leaderboardScope === 'overall'
-                      ? (serverLeaderboard?.overallRankings ?? []).map((r, i) => (
-                          <div
-                            key={i}
-                            className={`p-3.5 rounded-2xl border flex items-center justify-between ${
-                              r.is_me
-                                ? 'bg-[#EAF3EE] border-[#144734]'
-                                : 'bg-[#FAF7F0] border-[#E6DEC8]'
-                            }`}
-                          >
-                            <div className="flex items-center gap-3">
-                              <span className="w-8 h-8 rounded-xl bg-white border border-[#D5CBB4] font-bold text-xs flex items-center justify-center">
-                                #{r.rank}
-                              </span>
-                              <span className="font-bold text-sm">{r.display_name}</span>
-                            </div>
-                            <span className="font-bold text-[#144734]">{r.total_points} نقطة</span>
+                    {(leaderboardScope === 'overall'
+                      ? (serverLeaderboard?.overallRankings ?? [])
+                      : (serverLeaderboard?.weeklyRankings ?? [])
+                    ).length === 0 ? (
+                      <div className="p-6 rounded-2xl bg-[#FAF7F0] border border-[#E6DEC8] text-center text-xs text-[#5B6E65]">
+                        لا توجد أسماء مشاركة في لوحة الصدارة العامة حالياً. (تظهر فقط أسماء الطلاب
+                        الذين اختاروا تفعيل الظهور في اللوحة).
+                      </div>
+                    ) : leaderboardScope === 'overall' ? (
+                      serverLeaderboard?.overallRankings.map((r, i) => (
+                        <div
+                          key={i}
+                          className={`p-3.5 rounded-2xl border flex items-center justify-between ${
+                            r.is_me
+                              ? 'bg-[#EAF3EE] border-[#144734]'
+                              : 'bg-[#FAF7F0] border-[#E6DEC8]'
+                          }`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className="w-8 h-8 rounded-xl bg-white border border-[#D5CBB4] font-bold text-xs flex items-center justify-center">
+                              #{r.rank}
+                            </span>
+                            <span className="font-bold text-sm">{r.display_name}</span>
                           </div>
-                        ))
-                      : (serverLeaderboard?.weeklyRankings ?? []).map((r, i) => (
-                          <div
-                            key={i}
-                            className={`p-3.5 rounded-2xl border flex items-center justify-between ${
-                              r.is_me
-                                ? 'bg-[#EAF3EE] border-[#144734]'
-                                : 'bg-[#FAF7F0] border-[#E6DEC8]'
-                            }`}
-                          >
-                            <div className="flex items-center gap-3">
-                              <span className="w-8 h-8 rounded-xl bg-white border border-[#D5CBB4] font-bold text-xs flex items-center justify-center">
-                                #{r.rank}
-                              </span>
-                              <span className="font-bold text-sm">{r.display_name}</span>
-                            </div>
-                            <span className="font-bold text-[#144734]">{r.week_points} نقطة</span>
+                          <span className="font-bold text-[#144734]">{r.total_points} نقطة</span>
+                        </div>
+                      ))
+                    ) : (
+                      serverLeaderboard?.weeklyRankings.map((r, i) => (
+                        <div
+                          key={i}
+                          className={`p-3.5 rounded-2xl border flex items-center justify-between ${
+                            r.is_me
+                              ? 'bg-[#EAF3EE] border-[#144734]'
+                              : 'bg-[#FAF7F0] border-[#E6DEC8]'
+                          }`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className="w-8 h-8 rounded-xl bg-white border border-[#D5CBB4] font-bold text-xs flex items-center justify-center">
+                              #{r.rank}
+                            </span>
+                            <span className="font-bold text-sm">{r.display_name}</span>
                           </div>
-                        ))}
+                          <span className="font-bold text-[#144734]">{r.week_points} نقطة</span>
+                        </div>
+                      ))
+                    )}
                   </div>
                 </section>
               </div>
@@ -1320,9 +1421,11 @@ export default function App() {
                     <input
                       type="text"
                       required
+                      minLength={2}
+                      maxLength={80}
                       value={adminKnownNameInput}
-                      onChange={(e) => setAdminKnownNameInput(e.target.value)}
-                      className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm"
+                      onChange={(e) => { profileDirty.current = true; setAdminKnownNameInput(e.target.value); }}
+                      className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm focus:outline-none focus:ring-2 focus:ring-[#144734]"
                     />
                   </div>
                   <div>
@@ -1332,22 +1435,24 @@ export default function App() {
                     <input
                       type="text"
                       required
+                      minLength={2}
+                      maxLength={50}
                       value={publicDisplayNameInput}
-                      onChange={(e) => setPublicDisplayNameInput(e.target.value)}
-                      className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm"
+                      onChange={(e) => { profileDirty.current = true; setPublicDisplayNameInput(e.target.value); }}
+                      className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm focus:outline-none focus:ring-2 focus:ring-[#144734]"
                     />
                   </div>
                   <label className="flex items-center gap-2 text-xs cursor-pointer">
                     <input
                       type="checkbox"
                       checked={leaderboardOptInInput}
-                      onChange={(e) => setLeaderboardOptInInput(e.target.checked)}
+                      onChange={(e) => { profileDirty.current = true; setLeaderboardOptInInput(e.target.checked); }}
                     />
                     <span>الظهور الاختياري في لوحة الصدارة العامة</span>
                   </label>
                   <button
                     type="submit"
-                    className="w-full min-h-[46px] rounded-xl bg-[#144734] text-white font-bold text-xs"
+                    className="w-full min-h-[46px] rounded-xl bg-[#144734] hover:bg-[#0D3123] text-white font-bold text-xs transition"
                   >
                     حفظ التغييرات
                   </button>
@@ -1371,57 +1476,97 @@ export default function App() {
 
                 <section className="bg-white rounded-3xl p-6 border border-[#E6DEC8] space-y-4">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <h2 className="text-lg font-bold text-[#144734]">
-                      لوحة مشرف الحلقة ({adminComputedStats.groupCompletionPct}% إنجاز جماعي)
-                    </h2>
+                    <div className="flex items-center gap-3">
+                      <h2 className="text-lg font-bold text-[#144734]">
+                        لوحة مشرف الحلقة ({adminComputedStats.groupCompletionPct}% إنجاز جماعي)
+                      </h2>
+                      <button
+                        type="button"
+                        onClick={() => void fetchBootstrapData()}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#FAF7F0] text-[#144734] border border-[#144734]/30 text-xs font-bold hover:bg-[#EAF3EE] transition"
+                        title="تحديث قائمة الطلبات"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>تحديث</span>
+                      </button>
+                    </div>
                     <button
                       type="button"
                       onClick={handleAdminExportCsv}
-                      className="px-4 py-2 rounded-xl bg-[#144734] text-white text-xs font-bold flex items-center gap-1.5"
+                      className="px-4 py-2 rounded-xl bg-[#144734] hover:bg-[#0D3123] text-white text-xs font-bold flex items-center gap-1.5 transition"
                     >
                       <Download className="w-4 h-4 text-[#D4AF37]" />
                       <span>تصدير CSV آمن</span>
                     </button>
                   </div>
 
+                  {reportGeneratedAt && (
+                    <div className="text-xs text-[#5B6E65]">
+                      <span>آخر تحديث: {new Date(reportGeneratedAt).toLocaleString('ar')}</span>
+                    </div>
+                  )}
+
                   <div className="space-y-2.5">
-                    {allProfilesForAdmin
-                      .filter((p) => p.email.toLowerCase() !== 'hajij94@gmail.com')
-                      .map((s) => (
-                        <div
-                          key={s.id}
-                          className="p-3.5 rounded-2xl bg-[#FAF7F0] border border-[#E6DEC8] flex flex-wrap items-center justify-between gap-2"
-                        >
-                          <div className="text-xs">
-                            <p className="font-bold text-sm text-[#162921]">
-                              {s.adminKnownName} ({s.publicDisplayName})
-                            </p>
-                            <p className="text-[#5B6E65]">
-                              {s.email} • الحالة: <strong>{s.membershipStatus}</strong>
-                            </p>
+                    {allProfilesForAdmin.filter((p) => !p.isAdmin)
+                      .length === 0 ? (
+                      <div className="p-6 rounded-2xl bg-[#FAF7F0] border border-[#E6DEC8] text-center text-xs text-[#5B6E65]">
+                        لا توجد طلبات انضمام جديدة من الطلاب حالياً. عندما يسجل أي طالب ستظهر بياناته
+                        هنا للاعتماد الفوري.
+                      </div>
+                    ) : (
+                      allProfilesForAdmin
+                        .filter((p) => !p.isAdmin)
+                        .map((s) => (
+                          <div
+                            key={s.id}
+                            className="p-3.5 rounded-2xl bg-[#FAF7F0] border border-[#E6DEC8] flex flex-wrap items-center justify-between gap-2"
+                          >
+                            <div className="text-xs">
+                              <p className="font-bold text-sm text-[#162921]">
+                                {s.adminKnownName} ({s.publicDisplayName})
+                              </p>
+                              <p className="text-[#5B6E65]">
+                                {s.email} • الحالة:{' '}
+                                <strong
+                                  className={
+                                    s.membershipStatus === 'approved'
+                                      ? 'text-[#144734]'
+                                      : s.membershipStatus === 'suspended'
+                                        ? 'text-[#7F2323]'
+                                        : 'text-[#94721B]'
+                                  }
+                                >
+                                  {s.membershipStatus === 'approved'
+                                    ? 'معتمد ✓'
+                                    : s.membershipStatus === 'suspended'
+                                      ? 'موقوف ✕'
+                                      : 'قيد المراجعة ⏳'}
+                                </strong>
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {(s.membershipStatus !== 'approved' || (challenge.id && s.challengeMembershipStatus !== 'approved')) && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdminSetMemberStatus(s.id, 'approved')}
+                                  className="px-3 py-1.5 rounded-xl bg-[#144734] hover:bg-[#0D3123] text-white text-xs font-bold transition"
+                                >
+                                  قبول وتفعيل
+                                </button>
+                              )}
+                              {s.membershipStatus !== 'suspended' && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdminSetMemberStatus(s.id, 'suspended')}
+                                  className="px-3 py-1.5 rounded-xl bg-[#FDF2F2] hover:bg-[#FBE8E8] text-[#7F2323] border border-[#F5C2C2] text-xs font-bold transition"
+                                >
+                                  إيقاف
+                                </button>
+                              )}
+                            </div>
                           </div>
-                          <div className="flex items-center gap-2">
-                            {s.membershipStatus !== 'approved' && (
-                              <button
-                                type="button"
-                                onClick={() => handleAdminSetMemberStatus(s.id, 'approved')}
-                                className="px-3 py-1.5 rounded-xl bg-[#144734] text-white text-xs font-bold"
-                              >
-                                قبول وتفعيل
-                              </button>
-                            )}
-                            {s.membershipStatus !== 'suspended' && (
-                              <button
-                                type="button"
-                                onClick={() => handleAdminSetMemberStatus(s.id, 'suspended')}
-                                className="px-3 py-1.5 rounded-xl bg-[#FDF2F2] text-[#7F2323] border border-[#F5C2C2] text-xs font-bold"
-                              >
-                                إيقاف
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      ))}
+                        ))
+                    )}
                   </div>
                 </section>
 
@@ -1431,21 +1576,36 @@ export default function App() {
                     className="bg-white rounded-3xl p-6 border border-[#E6DEC8] space-y-3"
                   >
                     <h3 className="text-base font-bold text-[#162921]">إعدادات التحدي وتاريخ البدء</h3>
-                    <input
-                      type="text"
-                      value={cfgTitle}
-                      onChange={(e) => setCfgTitle(e.target.value)}
-                      className="w-full min-h-[42px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm"
-                    />
-                    <input
-                      type="date"
-                      value={cfgStartDate}
-                      onChange={(e) => setCfgStartDate(e.target.value)}
-                      className="w-full min-h-[42px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm"
-                    />
+                    <div>
+                      <label className="block text-xs font-semibold text-[#162921] mb-1">
+                        عنوان التحدي
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        disabled={!challenge.id}
+                        value={cfgTitle}
+                        onChange={(e) => { configDirty.current = true; setCfgTitle(e.target.value); }}
+                        placeholder="تعالَ نؤمن ساعة"
+                        className="w-full min-h-[42px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm focus:outline-none focus:ring-2 focus:ring-[#144734]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-[#162921] mb-1">
+                        تاريخ البدء (بتوقيت دمشق)
+                      </label>
+                      <input
+                        type="date"
+                        disabled={!challenge.id}
+                        value={cfgStartDate}
+                        onChange={(e) => { configDirty.current = true; setCfgStartDate(e.target.value); }}
+                        className="w-full min-h-[42px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm focus:outline-none focus:ring-2 focus:ring-[#144734]"
+                      />
+                    </div>
                     <button
                       type="submit"
-                      className="w-full min-h-[44px] rounded-xl bg-[#144734] text-white text-xs font-bold"
+                      disabled={!challenge.id}
+                      className="w-full min-h-[44px] rounded-xl bg-[#144734] hover:bg-[#0D3123] text-white text-xs font-bold transition"
                     >
                       حفظ إعدادات التحدي
                     </button>
@@ -1455,34 +1615,54 @@ export default function App() {
                     <h3 className="text-base font-bold text-[#162921]">
                       أرشفة الدورة الحالية وفتح دورة جديدة
                     </h3>
-                    <input
-                      type="text"
-                      value={newChallengeTitle}
-                      onChange={(e) => setNewChallengeTitle(e.target.value)}
-                      className="w-full min-h-[42px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm"
-                    />
-                    <input
-                      type="date"
-                      value={newChallengeStartDate}
-                      onChange={(e) => setNewChallengeStartDate(e.target.value)}
-                      className="w-full min-h-[42px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm"
-                    />
+                    <div>
+                      <label className="block text-xs font-semibold text-[#162921] mb-1">
+                        عنوان الدورة الجديدة
+                      </label>
+                      <input
+                        type="text"
+                        value={newChallengeTitle}
+                        onChange={(e) => setNewChallengeTitle(e.target.value)}
+                        placeholder="تعالَ نؤمن ساعة — الدورة التالية"
+                        className="w-full min-h-[42px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm focus:outline-none focus:ring-2 focus:ring-[#144734]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-[#162921] mb-1">
+                        تاريخ بدء الدورة الجديدة
+                      </label>
+                      <input
+                        type="date"
+                        value={newChallengeStartDate}
+                        onChange={(e) => setNewChallengeStartDate(e.target.value)}
+                        className="w-full min-h-[42px] px-3 py-2 rounded-xl border border-[#D5CBB4] text-sm focus:outline-none focus:ring-2 focus:ring-[#144734]"
+                      />
+                    </div>
                     {!showArchiveConfirm ? (
                       <button
                         type="button"
                         onClick={() => setShowArchiveConfirm(true)}
-                        className="w-full min-h-[44px] rounded-xl bg-[#FAF7F0] text-[#144734] border border-[#144734]/30 text-xs font-bold"
+                        className="w-full min-h-[44px] rounded-xl bg-[#FAF7F0] text-[#144734] border border-[#144734]/30 text-xs font-bold hover:bg-[#EAF3EE] transition"
                       >
                         أرشفة الدورة الحالية وفتح دورة جديدة
                       </button>
                     ) : (
-                      <button
-                        type="button"
-                        onClick={handleAdminArchiveChallenge}
-                        className="w-full min-h-[44px] rounded-xl bg-[#144734] text-white text-xs font-bold"
-                      >
-                        تأكيد الأرشفة وإنشاء الدورة الجديدة
-                      </button>
+                      <div className="space-y-2">
+                        <button
+                          type="button"
+                          onClick={handleAdminArchiveChallenge}
+                          className="w-full min-h-[44px] rounded-xl bg-[#144734] hover:bg-[#0D3123] text-white text-xs font-bold transition"
+                        >
+                          تأكيد الأرشفة وإنشاء الدورة الجديدة
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowArchiveConfirm(false)}
+                          className="w-full min-h-[38px] rounded-xl bg-[#FAF7F0] text-[#5B6E65] border border-[#E6DEC8] text-xs font-semibold hover:bg-[#F3EDE0] transition"
+                        >
+                          إلغاء والتراجع
+                        </button>
+                      </div>
                     )}
                   </div>
                 </section>
@@ -1490,6 +1670,8 @@ export default function App() {
             )}
           </div>
         )}
+        </>}
+        </fieldset>
       </main>
     </div>
   );

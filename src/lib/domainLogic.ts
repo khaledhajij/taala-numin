@@ -1,4 +1,4 @@
-import {
+import type {
   CalendarDayDetail,
   ChallengeConfig,
   ChallengeLifecycleState,
@@ -8,7 +8,7 @@ import {
   PersonalDashboardMetrics,
   PublicLeaderboardRow,
   StudentProfile,
-} from '../types/domain';
+} from '../types/domain.ts';
 
 export const DAILY_ACTIVITIES_META = [
   {
@@ -73,10 +73,19 @@ export function diffCalendarDays(startDate: string, endDate: string): number {
 }
 
 /**
+ * Validates whether a value is a standard RFC 4122 UUID.
+ */
+export function isValidUuid(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.trim());
+}
+
+/**
  * Derives points strictly from the 3 boolean activity flags (0..3).
  * Never trusts any external/browser score field.
  */
-export function computeActivityPoints(input: DailyActivitiesInput): number {
+export function computeActivityPoints(input?: DailyActivitiesInput | null): number {
+  if (!input) return 0;
   return (
     (input.quranTwoPages ? 1 : 0) +
     (input.ishaCongregation ? 1 : 0) +
@@ -335,7 +344,8 @@ export function computeLeaderboardAndGroupStats(
 
   const eligibleStudents = profiles.filter(
     (p) =>
-      p.membershipStatus === 'approved' &&
+      (challenge.isArchived || p.membershipStatus === 'approved') &&
+      p.challengeMembershipStatus === 'approved' && !p.isAdmin &&
       !adminEmailSet.has(p.email.trim().toLowerCase())
   );
 
@@ -514,7 +524,7 @@ export function generateSafeAdminCsv(rows: AdminExportStudentRow[]): string {
     'الاسم الظاهر في اللوحة',
     'البريد الإلكتروني',
     'حالة العضوية',
-    'مجموع النقاط (من 90)',
+    'مجموع النقاط',
     'نسبة الإنجاز (%)',
     'أيام المواظبة المتتالية (السلسلة)',
     'الأيام المكتملة (3/3)',

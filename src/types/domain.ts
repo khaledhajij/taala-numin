@@ -11,6 +11,8 @@ export interface StudentProfile {
   membershipStatus: MembershipStatus;
   statusReason?: string | null;
   statusUpdatedAt: string;
+  isAdmin?: boolean;
+  challengeMembershipStatus?: MembershipStatus | null;
 }
 
 export interface ChallengeConfig {

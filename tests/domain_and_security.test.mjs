@@ -2,6 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import {
+  isValidUuid,
+  computeActivityPoints as domainComputeActivityPoints,
+  calculateStreakDays as domainCalculateStreakDays,
+  evaluateChallengeWindow,
+  calculatePersonalDashboard,
+  computeLeaderboardAndGroupStats,
+  generateSafeAdminCsv,
+} from '../src/lib/domainLogic.ts';
 
 // =============================================================================
 // Reference Backend & Domain Engine (Mirrors PostgreSQL RLS + RPC + TypeScript Domain)
@@ -797,4 +806,76 @@ test('13. SQL Migrations static verification (RLS, Force RLS, SECURITY DEFINER s
   assert.match(m3, /revoke all on function public\.save_today_achievement/i);
   const m4 = fs.readFileSync(path.join(migrationsDir, '20261014000004_bootstrap_admin.sql'), 'utf8');
   assert.match(m4, /hajij94@gmail\.com/);
+  const m5 = fs.readFileSync(path.join(migrationsDir, '20261015000005_signup_requests.sql'), 'utf8');
+  assert.match(m5, /set search_path = public, pg_temp/i);
+  assert.match(m5, /revoke all on function public\.create_signup_profile/i);
+  assert.match(m5, /create trigger on_auth_user_signup_profile/i);
+  const m6 = fs.readFileSync(path.join(migrationsDir, '20261015000006_logic_and_security.sql'), 'utf8');
+  assert.match(m6, /set search_path = public, pg_temp/i);
+  assert.match(m6, /revoke all on function public\.register_admin_user/i);
+});
+
+test('14. Production domain logic & utility validation (UUID, null-safety, dashboard metrics)', () => {
+  // UUID validation: rejects non-UUID strings, empty, null, and 'default-challenge'
+  assert.equal(isValidUuid('default-challenge'), false);
+  assert.equal(isValidUuid(''), false);
+  assert.equal(isValidUuid(null), false);
+  assert.equal(isValidUuid(undefined), false);
+  assert.equal(isValidUuid('12345'), false);
+  assert.equal(isValidUuid('a8098c1a-f86e-11da-bd1a-00112444be1e'), true);
+  assert.equal(isValidUuid('A8098C1A-F86E-11DA-BD1A-00112444BE1E'), true);
+
+  // Activity points null safety
+  assert.equal(domainComputeActivityPoints(null), 0);
+  assert.equal(domainComputeActivityPoints(undefined), 0);
+  assert.equal(domainComputeActivityPoints({ quranTwoPages: true, ishaCongregation: true, morningAdhkar: false }), 2);
+
+  // evaluateChallengeWindow edge cases
+  const unstarted = evaluateChallengeWindow({
+    id: 'ch-test',
+    title: 'تحدي تجريبي',
+    communityName: 'حلقة',
+    startDate: null,
+    durationDays: 30,
+    collectiveGoalPct: 80,
+    isArchived: false,
+  }, '2026-10-15');
+  assert.equal(unstarted.state, 'upcoming');
+  assert.equal(unstarted.elapsedDays, 0);
+
+  const active = evaluateChallengeWindow({
+    id: 'ch-test',
+    title: 'تحدي تجريبي',
+    communityName: 'حلقة',
+    startDate: '2026-10-10',
+    durationDays: 30,
+    collectiveGoalPct: 80,
+    isArchived: false,
+  }, '2026-10-15');
+  assert.equal(active.state, 'active');
+  assert.equal(active.currentDayNumber, 6);
+  assert.equal(active.elapsedDays, 6);
+  assert.equal(active.currentWeekNumber, 1);
+
+  // calculatePersonalDashboard edge cases
+  const dashboard = calculatePersonalDashboard({
+    id: 'ch-test',
+    title: 'تحدي تجريبي',
+    communityName: 'حلقة',
+    startDate: '2026-10-10',
+    durationDays: 30,
+    collectiveGoalPct: 80,
+    isArchived: false,
+  }, [
+    { id: '1', challengeId: 'ch-test', studentId: 's1', achievementDate: '2026-10-10', quranTwoPages: true, ishaCongregation: true, morningAdhkar: true, points: 3, revision: 1, updatedAt: '' },
+    { id: '2', challengeId: 'ch-test', studentId: 's1', achievementDate: '2026-10-11', quranTwoPages: true, ishaCongregation: false, morningAdhkar: true, points: 2, revision: 1, updatedAt: '' },
+  ], '2026-10-15');
+
+  assert.equal(dashboard.totalPoints, 5);
+  assert.equal(dashboard.maxPossiblePoints, 90);
+  assert.equal(dashboard.calendarDays.length, 30);
+  assert.equal(dashboard.fullDaysCount, 1);
+  assert.equal(dashboard.elapsedDays, 6);
+  assert.equal(dashboard.availablePointsToDate, 18);
+  assert.equal(dashboard.completionPercentage, 27.8);
 });
