@@ -784,9 +784,7 @@ test('12. CSV export permissions & spreadsheet formula injection neutralization'
 });
 
 test('13. SQL Migrations static verification (RLS, Force RLS, SECURITY DEFINER search_path, Unique Constraint)', () => {
-  const migrationsDir = path.resolve(
-    '/working_dir/c_57ad19ff2244f730/artifacts/file_generation/ttl=63d/intermediate/taala-numin-saa/supabase/migrations'
-  );
+  const migrationsDir = path.resolve('supabase/migrations');
   const m1 = fs.readFileSync(path.join(migrationsDir, '20261014000001_initial_schema.sql'), 'utf8');
   const m2 = fs.readFileSync(path.join(migrationsDir, '20261014000002_rls_and_grants.sql'), 'utf8');
   const m3 = fs.readFileSync(path.join(migrationsDir, '20261014000003_rpc_functions.sql'), 'utf8');
