@@ -1,33 +1,21 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
-  BookOpen,
-  Users,
-  Sun,
-  CheckCircle2,
   AlertCircle,
-  Clock,
-  Flame,
-  Trophy,
   Calendar,
-  UserCheck,
-  ShieldAlert,
-  Download,
-  Settings,
-  Archive,
-  LogOut,
-  Sparkles,
   Check,
-  ChevronLeft,
-  Lock,
-  RefreshCw,
-  Eye,
-  EyeOff,
+  CheckCircle2,
+  Clock,
+  Download,
+  Flame,
+  LogOut,
+  Settings,
+  ShieldAlert,
+  Sparkles,
+  Trophy,
+  UserCheck,
   UserPlus,
-  Ban,
-  Info,
-  Award,
 } from 'lucide-react';
-import { supabase, isSupabaseConfigured, getOAuthRedirectUrl } from './lib/supabase';
+import { supabase, isSupabaseConfigured } from './lib/supabase';
 import {
   ChallengeConfig,
   DailyAchievementRecord,
@@ -38,7 +26,6 @@ import {
 import {
   DAILY_ACTIVITIES_META,
   ENCOURAGEMENT_MOTTO,
-  addCalendarDays,
   calculatePersonalDashboard,
   calculateStreakDays,
   computeActivityPoints,
@@ -165,7 +152,6 @@ export default function App() {
     type: 'success' | 'error';
     text: string;
   } | null>(null);
-  const [inspectedStudentId, setInspectedStudentId] = useState<string | null>(null);
   const [newChallengeTitle, setNewChallengeTitle] = useState<string>(
     'تعالَ نؤمن ساعة — الدورة التالية'
   );
@@ -481,25 +467,6 @@ export default function App() {
       setAuthError(translateAuthError(msg));
     } finally {
       setAuthSubmitting(false);
-    }
-  };
-
-  const handleGoogleSignIn = async () => {
-    setAuthError(null);
-    if (!supabase) {
-      setAuthError(
-        'لم يتم ضبط متغيرات البيئة VITE_SUPABASE_URL و VITE_SUPABASE_ANON_KEY بعد.'
-      );
-      return;
-    }
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: {
-        redirectTo: getOAuthRedirectUrl(),
-      },
-    });
-    if (error) {
-      setAuthError(translateAuthError(error.message));
     }
   };
 
