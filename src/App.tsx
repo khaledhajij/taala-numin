@@ -404,7 +404,7 @@ export default function App() {
 
     if (!supabase) {
       setAuthError(
-        'لم يتم ضبط متغيرات البيئة VITE_SUPABASE_URL و VITE_SUPABASE_ANON_KEY بعد. يرجى إضافتها في إعدادات الاستضافة (Vercel / Netlify) أو في ملف .env.local.'
+        'لم يتم ضبط إعدادات Supabase بعد. أضف VITE_SUPABASE_URL و VITE_SUPABASE_PUBLISHABLE_KEY (أو VITE_SUPABASE_ANON_KEY) في إعدادات الاستضافة ثم أعد النشر، أو في ملف .env.local ثم أعد تشغيل خادم التطوير.'
       );
       return;
     }

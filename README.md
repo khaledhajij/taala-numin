@@ -30,14 +30,16 @@
 1. **نسخ مفاتيح الربط العامة من Supabase:**
    * في لوحة تحكم **Supabase**، افتح **Project Settings** (أيقونة الترس أسفل القائمة اليسرى) -> **API**.
    * انسخ **Project URL** (`https://....supabase.co`).
-   * انسخ مفتاح **`anon` `public`** (لا تستخدم مفتاح `service_role` أبداً).
+   * انسخ مفتاح **Publishable** (أو مفتاح **`anon` `public`** القديم). لا تستخدم مفتاح `secret` أو `service_role` في الواجهة.
 
 2. **رفع المشروع ونشره على Vercel:**
    * فك ضغط ملف `taala-numin-saa-fullstack.zip` على جهازك، وارفع مجلد `taala-numin-saa` إلى مستودع GitHub خاص بك (أو شغّل `npx vercel` من داخل المجلد).
    * في موقع **Vercel** -> **Add New Project**، اختر المستودع، وفي قسم **Environment Variables** أضف المتغيرين التاليين:
      * `VITE_SUPABASE_URL` = رابط المشروع الذي نسخته من Supabase
-     * `VITE_SUPABASE_ANON_KEY` = مفتاح `anon public` الذي نسخته من Supabase
+     * `VITE_SUPABASE_PUBLISHABLE_KEY` = مفتاح Publishable الذي نسخته من Supabase. يدعم التطبيق أيضاً `VITE_SUPABASE_ANON_KEY` للمفتاح القديم، ويعطي الأولوية لـ Publishable عند وجود الاثنين.
+   * اختر بيئة **Production**، وأضف المتغيرات إلى **Preview** أيضاً إذا كنت تستخدم روابط المعاينة.
    * اضغط **Deploy**.
+   * إذا أضفت المتغيرات أو عدّلتها بعد النشر، نفّذ **Redeploy** لتضمينها في البناء الجديد. محلياً، أضفها في `.env.local` ثم أعد تشغيل `npm run dev`.
 
 3. **تسجيل دخولك كمشرف عام وبدء التحدي:**
    * افتح رابط التطبيق المنشور على Vercel.
